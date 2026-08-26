@@ -111,3 +111,16 @@ stateDiagram-v2
 1. **Zero Secret Storage**: Never store service account keys in repository or configuration files.
 2. **Standard GCP ADC**: Use `google.auth.default()` or direct GCP Instance Metadata Server queries.
 3. **Token Management**: Thread-safe / async token caching with automatic proactive refresh before expiration.
+
+---
+
+## 6. Execution Environment & Machine Sizing Matrix
+
+| Workload Range | Recommended Target | Specs | Architectural Rationale |
+| :--- | :--- | :--- | :--- |
+| **< 1.5k QPS** | Google Cloud Shell | Shared vCPU, ~1 Gbps | Free development environment for dry-run verification and low-rate pre-warming. |
+| **1.5k – 10k QPS** | `e2-standard-4` / `n2-standard-4` | 4 vCPU, 16 GB, 10 Gbps | Standard VM sizing for moderate pre-warming. |
+| **10k – 30k QPS** | `c2-standard-8` / `c3-standard-8` | 8 vCPU, 32 GB, 16–32 Gbps | Compute-optimized 3.8 GHz Turbo for high async HTTP socket concurrency with < 5ms RTT latency. |
+| **30k – 100k+ QPS**| `c2-standard-16` / `c3-standard-22` | 16–22 vCPU, 64 GB, 50–100 Gbps Tier_1 | Massive enterprise pre-warming across 256–4096 shard keyspaces. |
+
+* **Co-Location Requirement**: All VM instances MUST be deployed inside the same Google Cloud region as the target GCS bucket for direct intra-VPC storage network routing.

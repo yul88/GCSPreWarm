@@ -154,10 +154,10 @@ python3 src/main.py
 
 ### 3. Option B: Running on Google Compute Engine (GCE) VM
 
-For extreme throughput (e.g., 20,000–50,000+ QPS), a standard Compute Engine VM (e.g., `c2-standard-8` or `c3-standard-8` in the same region as the bucket) is recommended:
+For mid-range to extreme throughput (Ks to 10Ks+ of QPS), running on a standard Compute Engine VM inside the **same GCP region as your bucket** is strongly recommended:
 
 ```bash
-# 1. Create a VM with Cloud Storage read/write access (or attach an authorized Service Account)
+# 1. Create a VM with Cloud Storage read/write access in your bucket's region
 gcloud compute instances create gcs-prewarm-runner \
     --zone=us-central1-a \
     --machine-type=c2-standard-8 \
@@ -176,6 +176,22 @@ cp .env.example .env
 nano .env
 python3 src/main.py
 ```
+
+---
+
+### 🖥️ Machine Sizing & VM Selection Matrix
+
+Choose your execution environment based on your desired target QPS:
+
+| Target Workload (QPS) | Recommended Machine Type | Specs (vCPUs / RAM / Egress) | Notes & Best Use Cases |
+| :--- | :--- | :--- | :--- |
+| **< 1,500 QPS** | **Google Cloud Shell** *(Free)* | Shared CPU, ~1 Gbps network | Quick testing, configuration dry-runs, and low-QPS pre-warming. |
+| **1,500 – 10,000 QPS** *(Ks of QPS)* | **`e2-standard-4`** or **`n2-standard-4`** | 4 vCPUs, 16 GB RAM, 10 Gbps | Standard production pre-warm for moderate application traffic surges. |
+| **10,000 – 30,000 QPS** *(10Ks of QPS)* | **`c2-standard-8`** or **`c3-standard-8`** | 8 vCPUs, 32 GB RAM, 16–32 Gbps | Compute-Optimized (3.8 GHz Turbo) for high async I/O and < 5ms latency. |
+| **30,000 – 100,000+ QPS** *(Extreme Surge)* | **`c2-standard-16`** or **`c3-standard-22`** *(or multi-VM)* | 16–22 vCPUs, 64 GB RAM, Tier_1 Networking (50–100 Gbps) | Massive enterprise pre-warming for major data migrations or flash events. |
+
+> [!IMPORTANT]
+> **Co-Locate VM with Bucket Region**: Always deploy the GCE VM in the **same Google Cloud region** as your target GCS bucket (e.g. VM in `us-central1-a` for a `us-central1` bucket). Intra-region networking keeps round-trip latency at 2ms–5ms and incurs zero inter-region network egress charges.
 
 ---
 
