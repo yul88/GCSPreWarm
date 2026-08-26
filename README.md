@@ -1,0 +1,251 @@
+# GCSPreWarm: Google Cloud Storage Bucket Pre-Warming & Pre-Splitting Tool
+
+A lightweight, high-performance Python utility designed to help Google Cloud Platform (GCP) customers pre-warm and pre-split Google Cloud Storage (GCS) buckets to a desired Read/Write QPS without encountering `429 Too Many Requests` or `503 Service Unavailable` throttling during production traffic surges.
+
+---
+
+## 📌 Project Overview & Objectives
+
+* **Core Goal**: Automate the process of scaling GCS internal index partitions by gradually ramping up distributed read or write load across uniform lexicographical key prefixes.
+* **Target Platforms**: Zero-friction execution in **GCP Cloud Shell** and **Google Compute Engine (GCE) Linux VMs**.
+* **Design Philosophy**:
+  * **Customer-Friendly**: Clean, readable Python code that enterprise security and SRE teams can easily inspect, audit, and adapt.
+  * **Zero Hardcoding**: All user parameters in `.env`, all engine/tuning constants in `src/config/settings.py`.
+  * **High Concurrency**: Asynchronous I/O via `asyncio` and `aiohttp` with HTTP Keep-Alive connection pooling to drive tens of thousands of requests per second.
+  * **Automatic Authentication**: Transparent GCP Application Default Credentials (ADC) and Metadata Server token resolution.
+
+---
+
+## 🛠️ Technology Stack & Architecture Decisions
+
+| Component | Decision | Rationale |
+| :--- | :--- | :--- |
+| **Language** | **Python (3.10+)** | Pre-installed in Cloud Shell & GCE VMs; universal readability for customer audits. |
+| **Async HTTP Engine** | `asyncio` + `aiohttp` | Connection-pooled asynchronous HTTP against direct GCS REST/XML endpoints for maximum throughput per VM core. |
+| **Authentication** | `google-auth` / GCP Metadata Server | Automatic resolution of Service Account / ADC without requiring exported JSON service account keys. |
+| **Configuration** | `.env` + `settings.py` (`pydantic-settings`) | Strict separation between user-facing parameters (`.env`) and technical tuning defaults (`settings.py`). |
+| **Terminal UI & Observability** | `rich` / `tqdm` | Real-time console metrics displaying instantaneous QPS, latency percentiles (p50, p95, p99), and HTTP status code distribution (2xx, 429, 503, 5xx). |
+
+---
+
+## ⚙️ Configuration Architecture
+
+### 1. User Parameters (`.env` / `.env.example`)
+* `GCS_BUCKET_NAME`: Target GCS bucket to pre-warm.
+* `GCP_PROJECT_ID`: (Optional) GCP Project ID.
+* `TARGET_READ_QPS`: Desired Read QPS to achieve (set `0` if write-only).
+* `TARGET_WRITE_QPS`: Desired Write QPS to achieve (set `0` if read-only).
+* `RAMP_DURATION_SECONDS`: Gradual ramp-up duration (default `1200s` / 20 min).
+* `SUSTAIN_DURATION_SECONDS`: Time to sustain target QPS (e.g., `600s`).
+* `OBJECT_SIZE_BYTES`: Size of dummy test payload (default `4096` bytes / 4 KB).
+* `KEY_STRATEGY`: Strategy for prefix generation (`HEX`, `ALPHANUMERIC`, `CUSTOM`).
+* `PREFIX_STRATEGY`: `AUTO` (computed from target QPS) or explicit (`HEX_1`, `HEX_2`, `HEX_3`).
+* `CUSTOM_PREFIXES`: Comma-separated list of customer prefixes (e.g., `users/,orders/,media/,events/`).
+* `PREFIX_TEMPLATE`: Sequence template for customer prefixes (e.g., `tenant_{001..050}/`).
+* `KEY_PREFIX_BASE`: Base folder path inside the bucket (e.g., `gcs_prewarm_test/` or empty `""` for bucket root).
+* `CLEANUP_ON_FINISH`: Automatically delete created test objects after run (`true`/`false`).
+* `KEEP_WARM_MODE`: Keep sending heartbeat traffic after test finishes to sustain splits (`true`/`false`).
+
+### 2. Engine & Network Settings (`src/config/settings.py`)
+* `GCS_BASE_URL`: `https://storage.googleapis.com`
+* `HTTP_MAX_CONNECTIONS`: `2000` (connection pool sizing)
+* `HTTP_TIMEOUT_SECONDS`: `10.0`
+* `NUM_WORKERS`: Auto-detected CPU worker processes
+* `METRICS_INTERVAL_SECONDS`: `1.0s`
+* `MAX_RETRIES`: `3` with exponential backoff on `429`/`503`
+
+---
+
+## 📐 GCS Partitioning & Key Pattern Mechanics
+
+### 1. Why Key Pattern Alignment is Critical
+Google Cloud Storage indexes bucket objects in **strict lexicographical order (UTF-8 byte order)**. Index partition splits happen only on the specific key ranges experiencing sustained traffic.
+* **If keyspace matches**: E.g., Warming `00/`–`ff/` when customer writes hash-prefixed keys (`md5(id)/...`), requests land directly in the warm shards $\rightarrow$ **Success**.
+* **If keyspace does NOT match**: E.g., Warming `00/`–`ff/` while customer writes to `user_uploads/...`, the `[u...]` key range was never split $\rightarrow$ **Customer still gets 429/503 errors**.
+* **Target Directory Pre-warming**: If customer data lives inside a subfolder (e.g., `app_v1/`), pre-warming must target `KEY_PREFIX_BASE=app_v1/` to split the index inside that subfolder.
+
+### 2. Supported Key Partitioning Strategies
+1. **`HEX` (Default for Hashes & UUIDs)**:
+   * Uniform hex characters (`0..f`, `00..ff`, `000..fff`).
+   * Ideal for workloads using MD5, SHA-256, or UUID key prefixes.
+2. **`ALPHANUMERIC` (Broad Character Set)**:
+   * Spans `0-9`, `a-z`, `A-Z`, `-`, `_`.
+   * Pre-splits across the broader ASCII range for varied root namespaces.
+3. **`CUSTOM` (Application-Specific Prefixes)**:
+   * Explicit folder list (e.g., `CUSTOM_PREFIXES=users/,orders/,media/,events/,logs/`) or template (e.g., `PREFIX_TEMPLATE=tenant_{001..050}/`).
+   * Accurately pre-warms exact customer operational folders.
+
+### 3. Shard Requirement Calculation
+* **Baseline Partition Limits**: $\approx 1,000$ write QPS and $\approx 5,000$ read QPS per shard.
+* **Calculation Formula**:
+  $$\text{Required Shards} = \max\left(\left\lceil \frac{\text{TARGET\_WRITE\_QPS}}{1,000} \times 1.5 \right\rceil, \left\lceil \frac{\text{TARGET\_READ\_QPS}}{5,000} \times 1.5 \right\rceil, 1\right)$$
+* **Hex Prefix Allocation Levels**:
+  * $\le 16$ shards: 1-hex character (`0/` – `f/`, 16 shards)
+  * $\le 256$ shards: 2-hex characters (`00/` – `ff/`, 256 shards $\rightarrow$ up to 256k write QPS)
+  * $> 256$ shards: 3-hex characters (`000/` – `fff/`, 4096 shards $\rightarrow$ up to 4M+ write QPS)
+
+---
+
+## 📈 Adaptive Ramp-Up & Rate Limiting Mechanics
+
+### 1. Step-Wise Exponential Ramp Schedule
+* **Starting Baseline**: Starts at safe initial baselines ($\min(\text{TARGET\_WRITE\_QPS}, 1000)$ and $\min(\text{TARGET\_READ\_QPS}, 5000)$).
+* **Stepped Doubling Curve**: Gradually steps up throughput (doubling target rate per interval across `RAMP_DURATION_SECONDS`) until target QPS is reached.
+* **Shard-Uniform Pacing**: Distributes target QPS across all active prefix shards using high-precision token-bucket rate limiters.
+
+### 2. Adaptive Backoff on Throttling
+* **Automatic Detection**: If HTTP `429 Too Many Requests` or `503 Service Unavailable` responses exceed a healthy threshold (e.g. > 1%), the ramp-up controller triggers adaptive backoff.
+* **Hold & Stabilize**: Ramping is frozen immediately; the generator backs down to the last stable QPS level and holds load for a stabilization cooldown window (e.g., 60s) allowing GCS backend index splits to complete.
+* **Gentle Recovery**: Once error rates drop back to 0%, the ramp automatically resumes toward the target QPS.
+
+### 3. Real-Time Telemetry & Progress Reporting
+* **Periodic Console Updates**: Emits status every few seconds (configurable via `REPORT_INTERVAL_SECONDS`, default `2s`):
+  * **Target vs. Current QPS**: Read QPS and Write QPS target vs. measured instantaneous throughput.
+  * **Latency Distribution**: Real-time p50, p95, p99, and max response times.
+  * **Status Code Health**: Live counts of `2xx OK`, `429 Rate Limited`, `503 Unavailable`, `5xx Errors`.
+  * **Execution Phase**: Clear status (`SEEDING`, `RAMPING [Step X/Y]`, `SUSTAINING`, `THROTTLING_BACKOFF`, `CLEANUP`).
+
+---
+
+## 🚀 Quick Start & Deployment Guide
+
+### 1. Prerequisites & IAM Permissions
+Ensure your GCP identity (Cloud Shell user or VM Service Account) has the following standard IAM roles:
+* **For Write Pre-warm & Cleanup**: `roles/storage.objectUser` (or `roles/storage.objectAdmin`).
+* **For Read-Only Pre-warm**: `roles/storage.objectViewer`.
+* **Bucket Verification**: `storage.buckets.get` permission.
+
+---
+
+### 2. Option A: Running in Google Cloud Shell (Fastest - 1 Minute)
+
+Cloud Shell comes with Python 3 and Google Cloud credentials pre-configured out of the box:
+
+```bash
+# 1. Clone the repository into Cloud Shell
+git clone https://github.com/<your-username>/GCSPreWarm.git
+cd GCSPreWarm
+
+# 2. Create virtual environment & install dependencies
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# 3. Create your configuration from the template
+cp .env.example .env
+nano .env  # Enter your GCS_BUCKET_NAME and TARGET_READ_QPS / TARGET_WRITE_QPS
+
+# 4. Preview the sharding plan (Dry Run)
+python3 src/main.py --dry-run
+
+# 5. Run the pre-warming process
+python3 src/main.py
+```
+
+> [!TIP]
+> **Cloud Shell Keep-Alive**: Since Cloud Shell sessions may disconnect if idle for 20 minutes, for long ramp runs (e.g. 20-30 min), run the tool inside `tmux` or `screen`:
+> ```bash
+> tmux new -s prewarm
+> python3 src/main.py
+> # You can detach anytime with Ctrl+B then D, and re-attach with: tmux attach -t prewarm
+> ```
+
+---
+
+### 3. Option B: Running on Google Compute Engine (GCE) VM
+
+For extreme throughput (e.g., 20,000–50,000+ QPS), a standard Compute Engine VM (e.g., `c2-standard-8` or `c3-standard-8` in the same region as the bucket) is recommended:
+
+```bash
+# 1. Create a VM with Cloud Storage read/write access (or attach an authorized Service Account)
+gcloud compute instances create gcs-prewarm-runner \
+    --zone=us-central1-a \
+    --machine-type=c2-standard-8 \
+    --scopes=https://www.googleapis.com/auth/devstorage.read_write,https://www.googleapis.com/auth/cloud-platform
+
+# 2. SSH into the VM
+gcloud compute ssh gcs-prewarm-runner --zone=us-central1-a
+
+# 3. Clone and run
+git clone https://github.com/<your-username>/GCSPreWarm.git
+cd GCSPreWarm
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+nano .env
+python3 src/main.py
+```
+
+---
+
+### 4. CLI Command Flags & Quick Overrides
+
+You can override any `.env` parameter directly from the command line:
+
+| Flag | Description | Example |
+| :--- | :--- | :--- |
+| `--dry-run` / `--plan` | Inspect the sharding calculation and ramp schedule without sending any requests. | `python3 src/main.py --dry-run` |
+| `--mock` | Run in local simulation mode (tests UI and workers without GCP network calls). | `python3 src/main.py --mock` |
+| `--bucket <name>` | Override the target GCS bucket name. | `python3 src/main.py --bucket my-bucket` |
+| `--target-write-qps <N>`| Override the target Write QPS. | `python3 src/main.py --target-write-qps 5000` |
+| `--target-read-qps <N>` | Override the target Read QPS. | `python3 src/main.py --target-read-qps 10000` |
+| `--ramp-duration <sec>` | Override ramp-up duration in seconds. | `python3 src/main.py --ramp-duration 600` |
+| `--sustain-duration <sec>`| Override sustain duration in seconds. | `python3 src/main.py --sustain-duration 300` |
+| `--workers <N>` | Override worker concurrency (defaults to auto-detected CPU cores). | `python3 src/main.py --workers 8` |
+| `--no-cleanup` | Keep created test objects after test completion. | `python3 src/main.py --no-cleanup` |
+| `--keep-warm` | Maintain low-rate heartbeat traffic after sustain finishes until stopped. | `python3 src/main.py --keep-warm` |
+
+---
+
+## 🗂️ Project Directory Structure
+
+```
+GCSPreWarm/
+├── .env.example              # Template environment file
+├── .gitignore                # Git ignore rules for Python and env files
+├── README.md                 # Project architecture, conclusions, and run guide
+├── requirements.txt          # Minimal Python dependencies
+├── specs/
+│   └── design_spec.md        # Formal architectural specification & contract
+├── src/
+│   ├── __init__.py
+│   ├── config/
+│   │   ├── __init__.py
+│   │   └── settings.py       # Centralized settings loader with validation
+│   ├── auth/
+│   │   ├── __init__.py
+│   │   └── gcp_auth.py       # Asynchronous ADC / Metadata token provider
+│   ├── core/
+│   │   ├── __init__.py
+│   │   ├── partitioner.py    # Sharding & prefix generator (HEX, ALPHANUMERIC, CUSTOM)
+│   │   ├── rate_limiter.py   # Adaptive token-bucket & ramp-up curve controller
+│   │   ├── load_generator.py # Asynchronous HTTP engine for Read/Write QPS
+│   │   └── metrics.py        # Real-time metrics collector (QPS, p50/p95/p99, errors)
+│   ├── ui/
+│   │   ├── __init__.py
+│   │   └── console.py        # Live console dashboard
+│   └── main.py               # CLI entrypoint
+└── tests/
+    ├── __init__.py
+    ├── test_load_generator.py
+    ├── test_metrics.py
+    ├── test_partitioner.py
+    ├── test_rate_limiter.py
+    └── test_settings.py
+```
+
+---
+
+## 📋 Discussion & Decisions Log
+
+| Date | Topic | Decision / Conclusion |
+| :--- | :--- | :--- |
+| 2026-08-26 | **Language Selection** | **Python (3.10+)** chosen for universal customer auditability, pre-installation in GCP Cloud Shell / GCE VMs, and high async I/O performance via `asyncio` + `aiohttp`. |
+| 2026-08-26 | **Configuration Pattern** | Strict two-layer configuration: User runtime variables in `.env` and technical defaults / connection settings in `settings.py`. |
+| 2026-08-26 | **Documentation Cadence** | `README.md` acts as the single source of truth for discussion conclusions, updated after every milestone decision. |
+| 2026-08-26 | **Ramp & Backoff Strategy** | Focus exclusively on the **most effective stepped exponential ramp** with **automatic adaptive backoff on 429/503 throttling** (freezing ramp, stabilizing shards, then resuming). |
+| 2026-08-26 | **Live Telemetry Reporting** | Live progress reporting every few seconds displaying Target R/W QPS, Current R/W QPS, Latency percentiles (p50/p95/p99), and HTTP status breakdown. |
+| 2026-08-26 | **Key Pattern Alignment** | GCS index splits are lexicographical; pre-warm keys must match customer key structure. Tool supports **HEX**, **ALPHANUMERIC**, **CUSTOM prefixes/templates**, and configurable **Base Path**. |
+| 2026-08-26 | **Explicit QPS Parameters** | Replaced `WORKLOAD_TYPE` & `READ_RATIO` with direct `TARGET_READ_QPS` and `TARGET_WRITE_QPS` numbers for zero-friction customer configuration and automatic mode detection. |
+| 2026-08-26 | **Full Implementation & Tests** | Complete async load engine, token-bucket rate limiter, metrics collector, CLI, and unit test suite verified. |
