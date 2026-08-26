@@ -216,7 +216,7 @@ class GCSLoadEngine:
         self.read_limiter.set_rate(read_qps)
         self.write_limiter.set_rate(write_qps)
 
-    async def cleanup_all_objects(self, max_concurrency: int = 100) -> int:
+    async def cleanup_all_objects(self, max_concurrency: int = 300) -> int:
         """Delete all created test objects and seed objects."""
         all_keys = list(self._created_keys) + list(self._seed_keys)
         if not all_keys:

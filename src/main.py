@@ -65,6 +65,12 @@ def parse_args() -> argparse.Namespace:
         help="Override worker concurrency multiplier (defaults to auto-detected CPU cores).",
     )
     parser.add_argument(
+        "--force",
+        "-f",
+        action="store_true",
+        help="Force execution even if target QPS is within initial GCS baseline limits (<= 5,000 Read, <= 1,000 Write).",
+    )
+    parser.add_argument(
         "--dry-run",
         "--plan",
         dest="dry_run",
@@ -138,6 +144,26 @@ async def async_main(args: argparse.Namespace) -> int:
         console.print("[bold yellow]ℹ️ Dry-run mode completed. No traffic sent to GCS.[/bold yellow]")
         return 0
 
+    # Check if target QPS is within initial GCS baseline limits
+    baseline_read = 5000
+    baseline_write = 1000
+    is_within_baseline = (
+        settings.target_read_qps <= baseline_read
+        and settings.target_write_qps <= baseline_write
+    )
+
+    if is_within_baseline and not (args.force or args.mock):
+        console.print(
+            "\n[bold yellow]ℹ️ Target QPS is within default GCS baseline capacity:[/bold yellow]\n"
+            f"  • Configured Target: [bold green]{settings.target_read_qps:,} Read QPS[/bold green], [bold green]{settings.target_write_qps:,} Write QPS[/bold green]\n"
+            f"  • Default GCS Baseline: [bold cyan]5,000 Read QPS[/bold cyan], [bold cyan]1,000 Write QPS[/bold cyan]\n\n"
+            "Google Cloud Storage automatically supports this workload without pre-warming or index splitting.\n"
+            "Pre-warming is only required when scaling beyond initial baseline limits.\n\n"
+            "[bold white]To force pre-warming/load testing anyway, re-run with the [bold cyan]--force[/bold cyan] (or [bold cyan]-f[/bold cyan]) flag:[/bold white]\n"
+            "  [dim]python3 src/main.py --force[/dim]\n"
+        )
+        return 0
+
     # Initialize components
     auth_provider = get_auth_provider(mock_mode=args.mock)
     metrics = MetricsCollector(window_seconds=settings.report_interval_seconds)
@@ -155,15 +181,20 @@ async def async_main(args: argparse.Namespace) -> int:
     # Cancellation & cleanup state
     interrupted = False
     cleaned_objects = 0
+    sigint_count = 0
 
     # Handle Ctrl+C gracefully
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
 
     def _sigint_handler():
-        nonlocal interrupted
+        nonlocal interrupted, sigint_count
+        sigint_count += 1
+        if sigint_count >= 2:
+            console.print("\n[bold red]⚡ Force exit (Ctrl+C pressed again). Terminating process immediately...[/bold red]")
+            os._exit(130)
         interrupted = True
-        console.print("\n[bold yellow]⚠️ Interrupt received (Ctrl+C). Initiating graceful shutdown...[/bold yellow]")
+        console.print("\n[bold yellow]⚠️ Interrupt received (Ctrl+C). Initiating shutdown & cleanup... (Press Ctrl+C again to abort cleanup)[/bold yellow]")
         stop_event.set()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -177,17 +208,29 @@ async def async_main(args: argparse.Namespace) -> int:
         # =====================================================================
         # Phase 1: Seed Phase (If Target Read QPS > 0)
         # =====================================================================
-        if settings.target_read_qps > 0:
+        if settings.target_read_qps > 0 and not stop_event.is_set():
             console.print("[cyan]🌱 Phase 1: Pre-populating seed objects for read pre-warm...[/cyan]")
             ramp_controller.phase = ExecutionPhase.SEEDING
-            seed_count = await engine.seed_objects(settings.seed_objects_per_prefix)
-            console.print(f"[green]✓ Pre-populated {seed_count:,} seed objects across {len(partitioner.plan.prefixes)} shards.[/green]\n")
+            seed_task = asyncio.create_task(engine.seed_objects(settings.seed_objects_per_prefix))
+            stop_task = asyncio.create_task(stop_event.wait())
+            done, pending = await asyncio.wait(
+                [seed_task, stop_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_event.is_set():
+                seed_task.cancel()
+                console.print("[yellow]⚠️ Seeding cancelled by user.[/yellow]")
+            else:
+                stop_task.cancel()
+                seed_count = seed_task.result()
+                console.print(f"[green]✓ Pre-populated {seed_count:,} seed objects across {len(partitioner.plan.prefixes)} shards.[/green]\n")
 
         # =====================================================================
         # Phase 2 & 3: Ramp-Up & Sustain Phases
         # =====================================================================
-        engine._is_running = True
-        ramp_controller.start(initial_phase=ExecutionPhase.RAMPING)
+        if not stop_event.is_set():
+            engine._is_running = True
+            ramp_controller.start(initial_phase=ExecutionPhase.RAMPING)
 
         # Launch workers (scaled across available CPU cores)
         worker_tasks = []

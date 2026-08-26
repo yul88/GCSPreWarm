@@ -187,6 +187,7 @@ You can override any `.env` parameter directly from the command line:
 | :--- | :--- | :--- |
 | `--dry-run` / `--plan` | Inspect the sharding calculation and ramp schedule without sending any requests. | `python3 src/main.py --dry-run` |
 | `--mock` | Run in local simulation mode (tests UI and workers without GCP network calls). | `python3 src/main.py --mock` |
+| `--force`, `-f` | Force pre-warm execution even if target QPS is within initial GCS baseline limits. | `python3 src/main.py --force` |
 | `--bucket <name>` | Override the target GCS bucket name. | `python3 src/main.py --bucket my-bucket` |
 | `--target-write-qps <N>`| Override the target Write QPS. | `python3 src/main.py --target-write-qps 5000` |
 | `--target-read-qps <N>` | Override the target Read QPS. | `python3 src/main.py --target-read-qps 10000` |
@@ -248,4 +249,5 @@ GCSPreWarm/
 | 2026-08-26 | **Live Telemetry Reporting** | Live progress reporting every few seconds displaying Target R/W QPS, Current R/W QPS, Latency percentiles (p50/p95/p99), and HTTP status breakdown. |
 | 2026-08-26 | **Key Pattern Alignment** | GCS index splits are lexicographical; pre-warm keys must match customer key structure. Tool supports **HEX**, **ALPHANUMERIC**, **CUSTOM prefixes/templates**, and configurable **Base Path**. |
 | 2026-08-26 | **Explicit QPS Parameters** | Replaced `WORKLOAD_TYPE` & `READ_RATIO` with direct `TARGET_READ_QPS` and `TARGET_WRITE_QPS` numbers for zero-friction customer configuration and automatic mode detection. |
+| 2026-08-26 | **Baseline Capacity Check** | If target QPS is $\le 5,000$ Read and $\le 1,000$ Write, notify user that standard GCS natively supports the workload without pre-warming, avoiding unnecessary operations (bypassable with `--force`). |
 | 2026-08-26 | **Full Implementation & Tests** | Complete async load engine, token-bucket rate limiter, metrics collector, CLI, and unit test suite verified. |
