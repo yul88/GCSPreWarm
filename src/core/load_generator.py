@@ -92,9 +92,8 @@ class GCSLoadEngine:
 
     async def _execute_write(self, key: str) -> None:
         """Execute a single PUT request."""
-        t0 = time.perf_counter()
         if self.mock_mode:
-            # Simulate local network latency
+            t0 = time.perf_counter()
             await asyncio.sleep(random.uniform(0.005, 0.020))
             lat = (time.perf_counter() - t0) * 1000.0
             self.metrics.record_request("WRITE", 200, lat)
@@ -109,6 +108,7 @@ class GCSLoadEngine:
         try:
             assert self._session is not None
             async with self._concurrency_semaphore:
+                t0 = time.perf_counter()
                 async with self._session.put(url, data=self._payload_bytes, headers=headers) as resp:
                     lat = (time.perf_counter() - t0) * 1000.0
                     status = resp.status
@@ -117,13 +117,12 @@ class GCSLoadEngine:
                         async with self._keys_lock:
                             self._created_keys.add(key)
         except Exception as e:
-            lat = (time.perf_counter() - t0) * 1000.0
-            self.metrics.record_request("WRITE", 0, lat, error=str(e))
+            self.metrics.record_request("WRITE", 0, 0.0, error=str(e))
 
     async def _execute_read(self, key: str) -> None:
         """Execute a single GET request."""
-        t0 = time.perf_counter()
         if self.mock_mode:
+            t0 = time.perf_counter()
             await asyncio.sleep(random.uniform(0.003, 0.015))
             lat = (time.perf_counter() - t0) * 1000.0
             self.metrics.record_request("READ", 200, lat)
@@ -135,14 +134,14 @@ class GCSLoadEngine:
         try:
             assert self._session is not None
             async with self._concurrency_semaphore:
+                t0 = time.perf_counter()
                 async with self._session.get(url, headers=headers) as resp:
                     # Read response body to complete transfer
                     await resp.read()
                     lat = (time.perf_counter() - t0) * 1000.0
                     self.metrics.record_request("READ", resp.status, lat)
         except Exception as e:
-            lat = (time.perf_counter() - t0) * 1000.0
-            self.metrics.record_request("READ", 0, lat, error=str(e))
+            self.metrics.record_request("READ", 0, 0.0, error=str(e))
 
     async def _execute_delete(self, key: str) -> bool:
         """Execute a single DELETE request."""
