@@ -77,8 +77,8 @@ Google Cloud Storage indexes bucket objects in **strict lexicographical order (U
 
 ### 3. Shard Requirement Calculation
 * **Baseline Partition Limits**: $\approx 1,000$ write QPS and $\approx 5,000$ read QPS per shard.
-* **Calculation Formula**:
-  $$\text{Required Shards} = \max\left(\left\lceil \frac{\text{TARGET\_WRITE\_QPS}}{1,000} \times 1.5 \right\rceil, \left\lceil \frac{\text{TARGET\_READ\_QPS}}{5,000} \times 1.5 \right\rceil, 1\right)$$
+* **Calculation Formula** (where $Q_{\text{write}}$ is Target Write QPS and $Q_{\text{read}}$ is Target Read QPS):
+  $$\text{Required Shards} = \max\left(\left\lceil \frac{Q_{\text{write}}}{1,000} \times 1.5 \right\rceil, \left\lceil \frac{Q_{\text{read}}}{5,000} \times 1.5 \right\rceil, 1\right)$$
 * **Hex Prefix Allocation Levels**:
   * $\le 16$ shards: 1-hex character (`0/` – `f/`, 16 shards)
   * $\le 256$ shards: 2-hex characters (`00/` – `ff/`, 256 shards $\rightarrow$ up to 256k write QPS)
@@ -89,7 +89,7 @@ Google Cloud Storage indexes bucket objects in **strict lexicographical order (U
 ## 📈 Adaptive Ramp-Up & Rate Limiting Mechanics
 
 ### 1. Step-Wise Exponential Ramp Schedule
-* **Starting Baseline**: Starts at safe initial baselines ($\min(\text{TARGET\_WRITE\_QPS}, 1000)$ and $\min(\text{TARGET\_READ\_QPS}, 5000)$).
+* **Starting Baseline**: Starts at safe initial baselines ($\min(Q_{\text{write}}, 1000)$ and $\min(Q_{\text{read}}, 5000)$).
 * **Stepped Doubling Curve**: Gradually steps up throughput (doubling target rate per interval across `RAMP_DURATION_SECONDS`) until target QPS is reached.
 * **Shard-Uniform Pacing**: Distributes target QPS across all active prefix shards using high-precision token-bucket rate limiters.
 
@@ -123,7 +123,7 @@ Cloud Shell comes with Python 3 and Google Cloud credentials pre-configured out 
 
 ```bash
 # 1. Clone the repository into Cloud Shell
-git clone https://github.com/<your-username>/GCSPreWarm.git
+git clone https://github.com/yul88/GCSPreWarm.git
 cd GCSPreWarm
 
 # 2. Create virtual environment & install dependencies
@@ -167,7 +167,7 @@ gcloud compute instances create gcs-prewarm-runner \
 gcloud compute ssh gcs-prewarm-runner --zone=us-central1-a
 
 # 3. Clone and run
-git clone https://github.com/<your-username>/GCSPreWarm.git
+git clone https://github.com/yul88/GCSPreWarm.git
 cd GCSPreWarm
 python3 -m venv .venv
 source .venv/bin/activate

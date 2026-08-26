@@ -48,8 +48,9 @@ GCS baseline capacities:
 * Baseline Write QPS per partition: $C_w = 1,000$
 * Baseline Read QPS per partition: $C_r = 5,000$
 * Safety Headroom Factor: $S = 1.5$
+* Configured Targets: $Q_{\text{write}}$ (Target Write QPS), $Q_{\text{read}}$ (Target Read QPS)
 
-$$\text{Required Shards} = \max\left(\left\lceil \frac{\text{TARGET\_WRITE\_QPS}}{C_w} \times S \right\rceil, \left\lceil \frac{\text{TARGET\_READ\_QPS}}{C_r} \times S \right\rceil, 1\right)$$
+$$\text{Required Shards} = \max\left(\left\lceil \frac{Q_{\text{write}}}{C_w} \times S \right\rceil, \left\lceil \frac{Q_{\text{read}}}{C_r} \times S \right\rceil, 1\right)$$
 
 ### 3.2 Key Prefix Partition Allocation
 * **`HEX` Mode**:
@@ -65,14 +66,14 @@ $$\text{Required Shards} = \max\left(\left\lceil \frac{\text{TARGET\_WRITE\_QPS}
 
 ### 3.3 Stepped Exponential Ramp-Up Curve
 * **Initial Safe Rate**:
-  * $R_0 = \min(\text{TARGET\_READ\_QPS}, 5000)$
-  * $W_0 = \min(\text{TARGET\_WRITE\_QPS}, 1000)$
+  * $R_0 = \min(Q_{\text{read}}, 5000)$
+  * $W_0 = \min(Q_{\text{write}}, 1000)$
 * **Step Count**: Calculated based on doubling steps:
-  $$N_{\text{steps}} = \max\left(\left\lceil \log_2 \frac{\text{TARGET\_WRITE\_QPS}}{W_0} \right\rceil, \left\lceil \log_2 \frac{\text{TARGET\_READ\_QPS}}{R_0} \right\rceil, 1\right)$$
-* **Step Duration**: $\Delta t = \frac{\text{RAMP\_DURATION\_SECONDS}}{N_{\text{steps}}}$
+  $$N_{\text{steps}} = \max\left(\left\lceil \log_2 \frac{Q_{\text{write}}}{W_0} \right\rceil, \left\lceil \log_2 \frac{Q_{\text{read}}}{R_0} \right\rceil, 1\right)$$
+* **Step Duration**: $\Delta t = \frac{T_{\text{ramp}}}{N_{\text{steps}}}$ (where $T_{\text{ramp}}$ is `RAMP_DURATION_SECONDS`)
 * **Rate at Step $k \in [0, N_{\text{steps}}-1]$**:
-  $$W_k = \min(W_0 \times 2^k, \text{TARGET\_WRITE\_QPS})$$
-  $$R_k = \min(R_0 \times 2^k, \text{TARGET\_READ\_QPS})$$
+  $$W_k = \min(W_0 \times 2^k, Q_{\text{write}})$$
+  $$R_k = \min(R_0 \times 2^k, Q_{\text{read}})$$
 
 ### 3.4 Adaptive Throttling Backoff Protocol
 1. **Detection**: Metric window checks ratio of `(429_count + 503_count) / total_requests`.
