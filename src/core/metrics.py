@@ -209,3 +209,100 @@ class MetricsCollector:
             throttling_rate=throttling_rate,
             error_rate=error_rate,
         )
+
+
+def aggregate_snapshots(snapshots: List[MetricSnapshot], elapsed_seconds: float) -> MetricSnapshot:
+    """Combine metric snapshots from multiple parallel worker processes."""
+    if not snapshots:
+        return MetricSnapshot(
+            timestamp=time.perf_counter(),
+            elapsed_seconds=elapsed_seconds,
+            current_read_qps=0.0,
+            current_write_qps=0.0,
+            current_total_qps=0.0,
+            total_read_ops=0,
+            total_write_ops=0,
+            total_ops=0,
+            window_2xx=0,
+            window_429=0,
+            window_503=0,
+            window_5xx=0,
+            window_errors=0,
+            cum_2xx=0,
+            cum_429=0,
+            cum_503=0,
+            cum_5xx=0,
+            cum_errors=0,
+            p50_latency_ms=0.0,
+            p95_latency_ms=0.0,
+            p99_latency_ms=0.0,
+            max_latency_ms=0.0,
+            throttling_rate=0.0,
+            error_rate=0.0,
+        )
+
+    cur_read_qps = sum(s.current_read_qps for s in snapshots)
+    cur_write_qps = sum(s.current_write_qps for s in snapshots)
+    cur_total_qps = sum(s.current_total_qps for s in snapshots)
+
+    total_read_ops = sum(s.total_read_ops for s in snapshots)
+    total_write_ops = sum(s.total_write_ops for s in snapshots)
+    total_ops = sum(s.total_ops for s in snapshots)
+
+    window_2xx = sum(s.window_2xx for s in snapshots)
+    window_429 = sum(s.window_429 for s in snapshots)
+    window_503 = sum(s.window_503 for s in snapshots)
+    window_5xx = sum(s.window_5xx for s in snapshots)
+    window_errors = sum(s.window_errors for s in snapshots)
+
+    cum_2xx = sum(s.cum_2xx for s in snapshots)
+    cum_429 = sum(s.cum_429 for s in snapshots)
+    cum_503 = sum(s.cum_503 for s in snapshots)
+    cum_5xx = sum(s.cum_5xx for s in snapshots)
+    cum_errors = sum(s.cum_errors for s in snapshots)
+
+    total_window_ops = sum(
+        s.window_2xx + s.window_429 + s.window_503 + s.window_5xx + s.window_errors
+        for s in snapshots
+    )
+    throttling_rate = (
+        sum(s.window_429 + s.window_503 for s in snapshots) / total_window_ops
+    ) if total_window_ops > 0 else 0.0
+    error_rate = (window_errors / total_window_ops) if total_window_ops > 0 else 0.0
+
+    valid_latencies_p50 = [s.p50_latency_ms for s in snapshots if s.p50_latency_ms > 0]
+    valid_latencies_p95 = [s.p95_latency_ms for s in snapshots if s.p95_latency_ms > 0]
+    valid_latencies_p99 = [s.p99_latency_ms for s in snapshots if s.p99_latency_ms > 0]
+    valid_latencies_max = [s.max_latency_ms for s in snapshots if s.max_latency_ms > 0]
+
+    p50 = sum(valid_latencies_p50) / len(valid_latencies_p50) if valid_latencies_p50 else 0.0
+    p95 = sum(valid_latencies_p95) / len(valid_latencies_p95) if valid_latencies_p95 else 0.0
+    p99 = sum(valid_latencies_p99) / len(valid_latencies_p99) if valid_latencies_p99 else 0.0
+    max_lat = max(valid_latencies_max) if valid_latencies_max else 0.0
+
+    return MetricSnapshot(
+        timestamp=time.perf_counter(),
+        elapsed_seconds=elapsed_seconds,
+        current_read_qps=cur_read_qps,
+        current_write_qps=cur_write_qps,
+        current_total_qps=cur_total_qps,
+        total_read_ops=total_read_ops,
+        total_write_ops=total_write_ops,
+        total_ops=total_ops,
+        window_2xx=window_2xx,
+        window_429=window_429,
+        window_503=window_503,
+        window_5xx=window_5xx,
+        window_errors=window_errors,
+        cum_2xx=cum_2xx,
+        cum_429=cum_429,
+        cum_503=cum_503,
+        cum_5xx=cum_5xx,
+        cum_errors=cum_errors,
+        p50_latency_ms=p50,
+        p95_latency_ms=p95,
+        p99_latency_ms=p99,
+        max_latency_ms=max_lat,
+        throttling_rate=throttling_rate,
+        error_rate=error_rate,
+    )

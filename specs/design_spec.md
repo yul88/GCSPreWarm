@@ -14,7 +14,8 @@
 | `GCP_PROJECT_ID` | `str` | `""` | Optional GCP Project ID. |
 | `TARGET_READ_QPS` | `int` | `0` | Desired read requests per second to achieve. |
 | `TARGET_WRITE_QPS` | `int` | `1000` | Desired write requests per second to achieve. |
-| `RAMP_DURATION_SECONDS`| `int` | `1200` | Duration (seconds) of the exponential ramp-up phase (default 20 min). |
+| `RAMP_PROFILE` | `str` | `"AUTO"` | Preset profile: `AUTO`, `FAST` (60s/step), `STANDARD` (100s/step), `CONSERVATIVE` (20m), or `CUSTOM`. |
+| `RAMP_DURATION_SECONDS`| `int` | `1200` | Duration (seconds) of ramp-up phase (used when `RAMP_PROFILE=CUSTOM`). |
 | `SUSTAIN_DURATION_SECONDS`| `int` | `600` | Duration (seconds) to hold sustained target QPS. |
 | `OBJECT_SIZE_BYTES` | `int` | `4096` | Payload size in bytes for dummy test objects (default 4KB). |
 | `KEY_STRATEGY` | `str` | `"HEX"` | Key generation strategy: `HEX`, `ALPHANUMERIC`, `CUSTOM`. |

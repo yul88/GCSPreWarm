@@ -12,11 +12,47 @@ def test_ramp_steps_calculation():
         gcs_bucket_name="test-bucket",
         target_write_qps=8000,  # Starts at 1000 -> 2000 -> 4000 -> 8000 (3 doubling steps)
         target_read_qps=0,
+        ramp_profile="CUSTOM",
         ramp_duration_seconds=300,
     )
     controller = AdaptiveRampController(settings)
     assert controller.total_steps == 3
     assert controller.step_duration == 100.0
+
+
+def test_ramp_profiles():
+    """Test duration calculations across AUTO, FAST, STANDARD, CONSERVATIVE presets."""
+    # Fast: 60s per step
+    s_fast = Settings(
+        gcs_bucket_name="test-bucket",
+        target_write_qps=8000, # 3 steps
+        target_read_qps=0,
+        ramp_profile="FAST",
+    )
+    c_fast = AdaptiveRampController(s_fast)
+    assert c_fast.total_steps == 3
+    assert c_fast.ramp_duration == 180.0
+    assert c_fast.step_duration == 60.0
+
+    # Standard: 100s per step
+    s_std = Settings(
+        gcs_bucket_name="test-bucket",
+        target_write_qps=8000, # 3 steps
+        target_read_qps=0,
+        ramp_profile="STANDARD",
+    )
+    c_std = AdaptiveRampController(s_std)
+    assert c_std.ramp_duration == 300.0
+
+    # Auto (8,000 QPS <= 10,000): 60s per step
+    s_auto = Settings(
+        gcs_bucket_name="test-bucket",
+        target_write_qps=8000,
+        target_read_qps=0,
+        ramp_profile="AUTO",
+    )
+    c_auto = AdaptiveRampController(s_auto)
+    assert c_auto.ramp_duration == 180.0
 
 
 def test_ramp_update_progression():

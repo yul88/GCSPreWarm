@@ -44,10 +44,14 @@ class Settings(BaseSettings):
         description="Desired Write QPS to achieve (0 to disable write pre-warm).",
     )
 
+    ramp_profile: Literal["AUTO", "FAST", "STANDARD", "CONSERVATIVE", "CUSTOM"] = Field(
+        default="AUTO",
+        description="Ramp profile preset: AUTO (auto-scales by QPS tier), FAST (~60s/step), STANDARD (~100s/step), CONSERVATIVE (20m total), or CUSTOM.",
+    )
     ramp_duration_seconds: int = Field(
         default=1200,
         gt=0,
-        description="Duration (in seconds) of the gradual ramp-up phase (default 20 min).",
+        description="Duration (in seconds) of the gradual ramp-up phase (used when RAMP_PROFILE=CUSTOM or as custom override).",
     )
     sustain_duration_seconds: int = Field(
         default=600,

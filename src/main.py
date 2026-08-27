@@ -5,6 +5,7 @@ import asyncio
 import os
 import signal
 import sys
+import time
 from typing import Optional
 
 # Ensure project root is in sys.path
@@ -16,7 +17,8 @@ from rich.live import Live
 from src.auth.gcp_auth import GCPAuthProvider, get_auth_provider
 from src.config.settings import Settings, get_settings
 from src.core.load_generator import GCSLoadEngine
-from src.core.metrics import MetricsCollector
+from src.core.metrics import MetricSnapshot, MetricsCollector
+from src.core.multi_worker import MultiProcessOrchestrator
 from src.core.partitioner import KeyPartitioner
 from src.core.rate_limiter import AdaptiveRampController, ExecutionPhase
 from src.ui.console import ConsoleDashboard
@@ -50,9 +52,22 @@ def parse_args() -> argparse.Namespace:
         help="Override target Write QPS.",
     )
     parser.add_argument(
+        "--profile",
+        "--ramp-profile",
+        dest="ramp_profile",
+        type=str,
+        choices=["AUTO", "FAST", "STANDARD", "CONSERVATIVE", "CUSTOM", "auto", "fast", "standard", "conservative", "custom"],
+        help="Ramp duration preset profile: AUTO (auto by QPS tier), FAST (~60s/step), STANDARD (~100s/step), CONSERVATIVE (20m total), or CUSTOM.",
+    )
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="Fast ramp shortcut: ~60s per doubling step (equivalent to --profile FAST).",
+    )
+    parser.add_argument(
         "--ramp-duration",
         type=int,
-        help="Override ramp-up duration in seconds.",
+        help="Explicit override for ramp-up duration in seconds (sets profile to CUSTOM).",
     )
     parser.add_argument(
         "--sustain-duration",
@@ -114,8 +129,13 @@ async def async_main(args: argparse.Namespace) -> int:
         settings.target_read_qps = args.target_read_qps
     if args.target_write_qps is not None:
         settings.target_write_qps = args.target_write_qps
+    if args.fast:
+        settings.ramp_profile = "FAST"
+    elif args.ramp_profile:
+        settings.ramp_profile = args.ramp_profile.upper()
     if args.ramp_duration is not None:
         settings.ramp_duration_seconds = args.ramp_duration
+        settings.ramp_profile = "CUSTOM"
     if args.sustain_duration is not None:
         settings.sustain_duration_seconds = args.sustain_duration
     if args.workers is not None:
@@ -166,22 +186,28 @@ async def async_main(args: argparse.Namespace) -> int:
 
     # Initialize components
     auth_provider = get_auth_provider(mock_mode=args.mock)
-    metrics = MetricsCollector(window_seconds=settings.report_interval_seconds)
     ramp_controller = AdaptiveRampController(settings)
-    engine = GCSLoadEngine(
+    seed_engine = GCSLoadEngine(
         settings=settings,
         partitioner=partitioner,
         auth_provider=auth_provider,
-        metrics=metrics,
+        metrics=MetricsCollector(window_seconds=settings.report_interval_seconds),
         mock_mode=args.mock,
     )
+    await seed_engine.initialize()
 
-    await engine.initialize()
+    # Multi-process orchestrator
+    orchestrator = MultiProcessOrchestrator(
+        settings=settings,
+        partitioner=partitioner,
+        mock_mode=args.mock,
+    )
 
     # Cancellation & cleanup state
     interrupted = False
     cleaned_objects = 0
     sigint_count = 0
+    final_snapshot: Optional[MetricSnapshot] = None
 
     # Handle Ctrl+C gracefully
     loop = asyncio.get_running_loop()
@@ -192,6 +218,7 @@ async def async_main(args: argparse.Namespace) -> int:
         sigint_count += 1
         if sigint_count >= 2:
             console.print("\n[bold red]⚡ Force exit (Ctrl+C pressed again). Terminating process immediately...[/bold red]")
+            orchestrator.stop()
             os._exit(130)
         interrupted = True
         console.print("\n[bold yellow]⚠️ Interrupt received (Ctrl+C). Initiating shutdown & cleanup... (Press Ctrl+C again to abort cleanup)[/bold yellow]")
@@ -211,7 +238,7 @@ async def async_main(args: argparse.Namespace) -> int:
         if settings.target_read_qps > 0 and not stop_event.is_set():
             console.print("[cyan]🌱 Phase 1: Pre-populating seed objects for read pre-warm...[/cyan]")
             ramp_controller.phase = ExecutionPhase.SEEDING
-            seed_task = asyncio.create_task(engine.seed_objects(settings.seed_objects_per_prefix))
+            seed_task = asyncio.create_task(seed_engine.seed_objects(settings.seed_objects_per_prefix))
             stop_task = asyncio.create_task(stop_event.wait())
             done, pending = await asyncio.wait(
                 [seed_task, stop_task],
@@ -226,49 +253,46 @@ async def async_main(args: argparse.Namespace) -> int:
                 console.print(f"[green]✓ Pre-populated {seed_count:,} seed objects across {len(partitioner.plan.prefixes)} shards.[/green]\n")
 
         # =====================================================================
-        # Phase 2 & 3: Ramp-Up & Sustain Phases
+        # Phase 2 & 3: Ramp-Up & Sustain Phases (Multi-Process Execution)
         # =====================================================================
         if not stop_event.is_set():
-            engine._is_running = True
             ramp_controller.start(initial_phase=ExecutionPhase.RAMPING)
+            orchestrator.start()
 
-        # Launch workers (scaled across available CPU cores)
-        worker_tasks = []
-        for _ in range(settings.num_workers):
-            if settings.target_write_qps > 0:
-                worker_tasks.append(asyncio.create_task(engine.run_write_worker()))
-            if settings.target_read_qps > 0:
-                worker_tasks.append(asyncio.create_task(engine.run_read_worker()))
+            start_t = time.perf_counter()
 
-        # Status monitoring loop
-        with Live(console=console, refresh_per_second=4) as live:
-            while not stop_event.is_set():
-                # Get metrics
-                snapshot = metrics.get_snapshot()
+            # Status monitoring loop
+            with Live(console=console, refresh_per_second=4) as live:
+                while not stop_event.is_set():
+                    elapsed = time.perf_counter() - start_t
 
-                # Update ramp controller
-                ramp_controller.report_metrics(snapshot.throttling_rate)
-                ramp_state = ramp_controller.update()
+                    # Poll multi-process metrics
+                    snapshot = orchestrator.poll_metrics(elapsed_seconds=elapsed)
+                    final_snapshot = snapshot
 
-                # Update engine rate limits
-                engine.update_rates(ramp_state.current_read_target, ramp_state.current_write_target)
+                    # Update ramp controller
+                    ramp_controller.report_metrics(snapshot.throttling_rate)
+                    ramp_state = ramp_controller.update()
 
-                # Render UI
-                table = dashboard.render_live_status(ramp_state, snapshot)
-                live.update(table)
+                    # Distribute rates to all worker processes
+                    orchestrator.set_target_rates(
+                        ramp_state.current_read_target,
+                        ramp_state.current_write_target,
+                    )
 
-                if ramp_state.phase == ExecutionPhase.COMPLETED:
-                    break
+                    # Render UI
+                    table = dashboard.render_live_status(ramp_state, snapshot)
+                    live.update(table)
 
-                try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=settings.report_interval_seconds)
-                except asyncio.TimeoutError:
-                    pass
+                    if ramp_state.phase == ExecutionPhase.COMPLETED:
+                        break
 
-        # Stop workers
-        engine._is_running = False
-        for t in worker_tasks:
-            t.cancel()
+                    try:
+                        await asyncio.wait_for(stop_event.wait(), timeout=settings.report_interval_seconds)
+                    except asyncio.TimeoutError:
+                        pass
+
+            orchestrator.stop()
 
         # =====================================================================
         # Phase 4: Keep-Warm Heartbeat (Optional)
@@ -276,36 +300,59 @@ async def async_main(args: argparse.Namespace) -> int:
         if settings.keep_warm_mode and not interrupted:
             console.print("\n[bold cyan]🔥 Entering Keep-Warm Heartbeat Mode (Ctrl+C to stop)...[/bold cyan]")
             ramp_controller.phase = ExecutionPhase.KEEP_WARM
-            engine._is_running = True
-            # Maintain 5 QPS per shard or target
             heartbeat_read = min(100.0, float(settings.target_read_qps)) if settings.target_read_qps > 0 else 0.0
             heartbeat_write = min(100.0, float(settings.target_write_qps)) if settings.target_write_qps > 0 else 0.0
-            engine.update_rates(heartbeat_read, heartbeat_write)
 
-            kw_tasks = []
-            if heartbeat_write > 0:
-                kw_tasks.append(asyncio.create_task(engine.run_write_worker()))
-            if heartbeat_read > 0:
-                kw_tasks.append(asyncio.create_task(engine.run_read_worker()))
-
+            orchestrator.start()
+            orchestrator.set_target_rates(heartbeat_read, heartbeat_write)
             await stop_event.wait()
-            engine._is_running = False
-            for t in kw_tasks:
-                t.cancel()
+            orchestrator.stop()
 
     finally:
         # =====================================================================
         # Phase 5: Cleanup Phase
         # =====================================================================
-        if settings.cleanup_on_finish:
+        orchestrator.stop()
+
+        # Collect created keys from workers and seed engine
+        all_created_keys = set(orchestrator.get_created_keys()) | seed_engine._created_keys | set(seed_engine._seed_keys)
+        seed_engine._created_keys = all_created_keys
+
+        if settings.cleanup_on_finish and all_created_keys:
             console.print("\n[bold cyan]🧹 Cleaning up created test objects...[/bold cyan]")
-            cleaned_objects = await engine.cleanup_all_objects()
+            cleaned_objects = await seed_engine.cleanup_all_objects(max_concurrency=300)
             console.print(f"[green]✓ Cleaned up {cleaned_objects:,} objects.[/green]")
 
-        await engine.close()
+        await seed_engine.close()
 
     # Final summary report
-    final_snapshot = metrics.get_snapshot()
+    if final_snapshot is None:
+        final_snapshot = MetricSnapshot(
+            timestamp=time.perf_counter(),
+            elapsed_seconds=0.0,
+            current_read_qps=0.0,
+            current_write_qps=0.0,
+            current_total_qps=0.0,
+            total_read_ops=0,
+            total_write_ops=0,
+            total_ops=0,
+            window_2xx=0,
+            window_429=0,
+            window_503=0,
+            window_5xx=0,
+            window_errors=0,
+            cum_2xx=0,
+            cum_429=0,
+            cum_503=0,
+            cum_5xx=0,
+            cum_errors=0,
+            p50_latency_ms=0.0,
+            p95_latency_ms=0.0,
+            p99_latency_ms=0.0,
+            max_latency_ms=0.0,
+            throttling_rate=0.0,
+            error_rate=0.0,
+        )
     dashboard.print_summary(final_snapshot, cleaned_objects)
     return 0
 

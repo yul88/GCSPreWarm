@@ -55,10 +55,20 @@ class ConsoleDashboard:
             f"'{plan.key_prefix_base}'" if plan.key_prefix_base else "(Root namespace)",
             "Base path inside bucket",
         )
+        profile_str = (getattr(settings, "ramp_profile", "AUTO") or "AUTO").upper()
+        table.add_row(
+            "Ramp Profile",
+            profile_str,
+            "Ramp duration preset (AUTO / FAST / STANDARD / CONSERVATIVE / CUSTOM)",
+        )
+
+        from src.core.rate_limiter import AdaptiveRampController
+        controller = AdaptiveRampController(settings)
+        effective_ramp_secs = int(controller.ramp_duration)
         table.add_row(
             "Ramp Duration",
-            f"{settings.ramp_duration_seconds}s ({settings.ramp_duration_seconds // 60}m)",
-            "Stepped exponential doubling curve",
+            f"{effective_ramp_secs}s ({effective_ramp_secs // 60}m {effective_ramp_secs % 60}s)",
+            f"Stepped doubling curve ({controller.total_steps} steps @ {int(controller.step_duration)}s/step)",
         )
         table.add_row(
             "Sustain Duration",

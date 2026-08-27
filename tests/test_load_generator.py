@@ -53,3 +53,34 @@ async def test_mock_load_engine_lifecycle():
     assert cleaned > 0
 
     await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_multiprocess_orchestrator():
+    """Test MultiProcessOrchestrator across multiple worker processes."""
+    from src.core.multi_worker import MultiProcessOrchestrator
+
+    settings = Settings(
+        gcs_bucket_name="test-bucket",
+        target_read_qps=200,
+        target_write_qps=200,
+        num_workers=2,
+    )
+    partitioner = KeyPartitioner(settings)
+    orchestrator = MultiProcessOrchestrator(
+        settings=settings,
+        partitioner=partitioner,
+        mock_mode=True,
+    )
+
+    orchestrator.start()
+    orchestrator.set_target_rates(200.0, 200.0)
+
+    await asyncio.sleep(0.5)
+
+    snapshot = orchestrator.poll_metrics(elapsed_seconds=0.5)
+    assert snapshot is not None
+    assert snapshot.total_ops > 0
+
+    orchestrator.stop()
+

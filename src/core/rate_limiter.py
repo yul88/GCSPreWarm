@@ -73,6 +73,7 @@ class AdaptiveRampController:
             read_steps = max(1, math.ceil(math.log2(self.target_read_qps / self.initial_read_qps)))
 
         self.total_steps = max(write_steps, read_steps, 1)
+        self.ramp_duration = self._compute_ramp_duration()
         self.step_duration = self.ramp_duration / self.total_steps
 
         # Runtime state
@@ -80,13 +81,40 @@ class AdaptiveRampController:
         self.start_time: Optional[float] = None
         self.effective_ramp_elapsed: float = 0.0
         self.last_update_time: Optional[float] = None
-
         self.sustain_start_time: Optional[float] = None
 
         # Backoff tracking
         self.is_throttled: bool = False
         self.throttling_start_time: Optional[float] = None
         self.last_stable_step: int = 0
+
+    def _compute_ramp_duration(self) -> float:
+        """Calculate effective ramp duration based on RAMP_PROFILE preset or AUTO QPS scaling."""
+        profile = (getattr(self.settings, "ramp_profile", "AUTO") or "AUTO").upper()
+
+        if profile == "CUSTOM":
+            return float(self.settings.ramp_duration_seconds)
+        elif profile == "FAST":
+            # Fast turbo preset: 60s per doubling step (e.g., 180s for 3 steps)
+            return float(max(60, self.total_steps * 60))
+        elif profile == "STANDARD":
+            # Standard preset: 100s per doubling step (e.g., 300s for 3 steps)
+            return float(max(100, self.total_steps * 100))
+        elif profile == "CONSERVATIVE":
+            # Conservative enterprise preset: 400s per doubling step (default 1200s for 3 steps)
+            return float(max(600, self.total_steps * 400))
+        else:  # "AUTO"
+            # Auto-detect optimal duration based on target QPS scale
+            max_target = max(self.target_read_qps, self.target_write_qps)
+            if max_target <= 10000:
+                # 5k - 10k QPS (1-3 steps) -> 60s per step (e.g., 180s for 3 steps)
+                return float(max(60, self.total_steps * 60))
+            elif max_target <= 30000:
+                # 10k - 30k QPS (4-5 steps) -> 75s per step (e.g., 300s for 4 steps)
+                return float(max(120, self.total_steps * 75))
+            else:
+                # 30k - 100k+ QPS (6+ steps) -> 90s per step (e.g., 540s for 6 steps)
+                return float(max(180, self.total_steps * 90))
 
     def start(self, initial_phase: ExecutionPhase = ExecutionPhase.RAMPING) -> None:
         """Start the ramp-up controller."""
