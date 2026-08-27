@@ -98,6 +98,11 @@ def parse_args() -> argparse.Namespace:
         help="Execute in local mock simulation mode (no GCP network calls or credentials required).",
     )
     parser.add_argument(
+        "--clean-only",
+        action="store_true",
+        help="Perform standalone cleanup of all test objects under KEY_PREFIX_BASE without running pre-warm load.",
+    )
+    parser.add_argument(
         "--no-cleanup",
         dest="cleanup",
         action="store_false",
@@ -157,11 +162,31 @@ async def async_main(args: argparse.Namespace) -> int:
         console.print(f"[bold red]❌ Configuration Error: {e}[/bold red]")
         return 1
 
+    # Initialize auth and engine
+    auth_provider = get_auth_provider(mock_mode=args.mock)
+    seed_engine = GCSLoadEngine(
+        settings=settings,
+        partitioner=partitioner,
+        auth_provider=auth_provider,
+        metrics=MetricsCollector(window_seconds=settings.report_interval_seconds),
+        mock_mode=args.mock,
+    )
+    await seed_engine.initialize()
+
+    # Handle Standalone Clean-Only mode
+    if args.clean_only:
+        console.print(f"\n[bold cyan]🧹 Standalone Cleanup Mode: Sweeping gs://{settings.gcs_bucket_name}/{settings.key_prefix_base}...[/bold cyan]")
+        cleaned_objects = await seed_engine.cleanup_all_objects(max_concurrency=300)
+        console.print(f"[bold green]✓ Standalone cleanup complete! Deleted {cleaned_objects:,} objects.[/bold green]\n")
+        await seed_engine.close()
+        return 0
+
     # Display plan
     dashboard.print_plan(partitioner.plan, settings)
 
     if args.dry_run:
         console.print("[bold yellow]ℹ️ Dry-run mode completed. No traffic sent to GCS.[/bold yellow]")
+        await seed_engine.close()
         return 0
 
     # Check if target QPS is within initial GCS baseline limits
@@ -182,19 +207,10 @@ async def async_main(args: argparse.Namespace) -> int:
             "[bold white]To force pre-warming/load testing anyway, re-run with the [bold cyan]--force[/bold cyan] (or [bold cyan]-f[/bold cyan]) flag:[/bold white]\n"
             "  [dim]python3 src/main.py --force[/dim]\n"
         )
+        await seed_engine.close()
         return 0
 
-    # Initialize components
-    auth_provider = get_auth_provider(mock_mode=args.mock)
     ramp_controller = AdaptiveRampController(settings)
-    seed_engine = GCSLoadEngine(
-        settings=settings,
-        partitioner=partitioner,
-        auth_provider=auth_provider,
-        metrics=MetricsCollector(window_seconds=settings.report_interval_seconds),
-        mock_mode=args.mock,
-    )
-    await seed_engine.initialize()
 
     # Multi-process orchestrator
     orchestrator = MultiProcessOrchestrator(

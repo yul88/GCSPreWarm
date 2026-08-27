@@ -215,9 +215,48 @@ class GCSLoadEngine:
         self.read_limiter.set_rate(read_qps)
         self.write_limiter.set_rate(write_qps)
 
+    async def list_objects_by_prefix(self, prefix: str) -> List[str]:
+        """List all object keys under a prefix via GCS JSON/REST API."""
+        if self.mock_mode:
+            return list(self._created_keys) + list(self._seed_keys)
+
+        found_keys: List[str] = []
+        page_token = None
+        headers = await self.auth_provider.get_auth_headers(project_id=self.settings.gcp_project_id)
+
+        try:
+            assert self._session is not None
+            while True:
+                url = f"https://storage.googleapis.com/storage/v1/b/{self.settings.gcs_bucket_name}/o?prefix={prefix}&fields=items(name),nextPageToken&maxResults=1000"
+                if page_token:
+                    url += f"&pageToken={page_token}"
+
+                async with self._session.get(url, headers=headers) as resp:
+                    if resp.status != 200:
+                        break
+                    data = await resp.json()
+                    items = data.get("items", [])
+                    for item in items:
+                        if "name" in item:
+                            found_keys.append(item["name"])
+
+                    page_token = data.get("nextPageToken")
+                    if not page_token:
+                        break
+        except Exception as e:
+            logger.debug(f"Prefix listing failed: {e}")
+
+        return found_keys
+
     async def cleanup_all_objects(self, max_concurrency: int = 300) -> int:
-        """Delete all created test objects and seed objects."""
-        all_keys = list(self._created_keys) + list(self._seed_keys)
+        """Delete all created test objects, seed objects, and leftover objects under prefix."""
+        all_keys = set(self._created_keys) | set(self._seed_keys)
+
+        # Also sweep any objects under the key prefix base to catch leftover files from previous runs
+        if self.settings.key_prefix_base and not self.mock_mode:
+            listed_keys = await self.list_objects_by_prefix(self.settings.key_prefix_base)
+            all_keys.update(listed_keys)
+
         if not all_keys:
             return 0
 
@@ -230,4 +269,6 @@ class GCSLoadEngine:
         tasks = [_bounded_delete(k) for k in all_keys]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         deleted_count = sum(1 for r in results if r is True)
+        self._created_keys.clear()
+        self._seed_keys.clear()
         return deleted_count

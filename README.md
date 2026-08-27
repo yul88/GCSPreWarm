@@ -212,6 +212,7 @@ You can override any `.env` parameter directly from the command line:
 | `--ramp-duration <sec>` | Override ramp-up duration in seconds (sets profile to `CUSTOM`). | `python3 src/main.py --ramp-duration 300` |
 | `--sustain-duration <sec>`| Override sustain duration in seconds. | `python3 src/main.py --sustain-duration 120` |
 | `--workers <N>` | Override worker concurrency (defaults to auto-detected CPU cores). | `python3 src/main.py --workers 8` |
+| `--clean-only` | Perform standalone cleanup of all test objects under `KEY_PREFIX_BASE` without running load. | `python3 src/main.py --clean-only` |
 | `--no-cleanup` | Keep created test objects after test completion. | `python3 src/main.py --no-cleanup` |
 | `--keep-warm` | Maintain low-rate heartbeat traffic after sustain finishes until stopped. | `python3 src/main.py --keep-warm` |
 
