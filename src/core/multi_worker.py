@@ -92,10 +92,13 @@ def _worker_process_entry(
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Collect created keys for cleanup (batch send)
+        # Collect created keys for cleanup in chunks of 5,000 to prevent pipe buffer saturation
         if engine._created_keys:
             try:
-                keys_queue.put_nowait(list(engine._created_keys))
+                keys_list = list(engine._created_keys)
+                chunk_size = 5000
+                for i in range(0, len(keys_list), chunk_size):
+                    keys_queue.put(keys_list[i : i + chunk_size], timeout=2.0)
             except Exception:
                 pass
 
@@ -192,12 +195,12 @@ class MultiProcessOrchestrator:
     def stop(self) -> None:
         """Signal all worker processes to stop and join."""
         self._stop_event.set()
-        # Drain queues before joining
-        self.get_created_keys()
         for p in self._processes:
-            p.join(timeout=0.2)
+            p.join(timeout=1.0)
             if p.is_alive():
                 p.terminate()
+        # Drain all remaining keys from queue
+        self.get_created_keys()
 
     def get_created_keys(self) -> List[str]:
         """Retrieve list of all keys created across all worker processes."""

@@ -33,7 +33,7 @@
 | `NUM_WORKERS` | `int` | `CPU Cores` | Auto-detected CPU cores (`os.cpu_count()`). 1 worker process per core. |
 | `WORKER_POOL_SIZE` | `int` | `Dynamic` | Auto-sized coroutines per process: $\text{clamp}(\lceil \frac{Q_{\text{target}}}{N_{\text{cpus}}} \times 0.05 \rceil, 20, 500)$. |
 | `HTTP_MAX_CONNECTIONS`| `int` | `Dynamic` | Auto-sized TCP pool per worker: $\max(200, \min(2000, \text{pool\_size} \times 2))$. |
-| `SEED_OBJECTS_PER_PREFIX`| `int`| `Dynamic` | Auto-sized seed count per shard: $\max(20, \min(200, \lceil \frac{Q_{\text{read}}}{N_{\text{shards}}} \times 0.1 \rceil))$. |
+| `SEED_OBJECTS_PER_PREFIX`| `int`| `20` | Optimal seed count per shard (20 objects per shard, auto-created in Phase 1). |
 | `CLEANUP_CONCURRENCY` | `int` | `Dynamic` | Auto-sized parallel deletion concurrency: $\max(100, \min(1000, N_{\text{cpus}} \times 50))$. |
 | `HTTP_TIMEOUT_SECONDS`| `float`| `10.0` | Individual request timeout in seconds. |
 | `HTTP_KEEP_ALIVE_SECONDS`| `float`| `60.0` | Keep-alive duration for TCP sockets. |

@@ -163,24 +163,33 @@ class GCSLoadEngine:
             logger.debug(f"Failed to delete {key}: {e}")
             return False
 
-    async def seed_objects(self, count_per_prefix: int) -> int:
+    async def seed_objects(self, count_per_prefix: int, progress_callback: Optional[callable] = None) -> int:
         """Pre-populate seed objects across all prefix shards for read tests."""
         total_created = 0
-        seed_tasks = []
+        all_seed_keys = []
 
         for prefix in self.plan.prefixes:
             for idx in range(count_per_prefix):
                 seed_key = self.partitioner.generate_seed_key(prefix, idx)
                 self._seed_keys.append(seed_key)
-                seed_tasks.append(self._execute_write(seed_key))
+                all_seed_keys.append(seed_key)
 
-        # Run seed writes in batches of 100
-        batch_size = 100
-        for i in range(0, len(seed_tasks), batch_size):
-            batch = seed_tasks[i : i + batch_size]
-            await asyncio.gather(*batch)
-            total_created += len(batch)
+        # Bounded concurrency to safely seed objects without un-warmed bucket throttling
+        semaphore = asyncio.Semaphore(50)
 
+        async def _seed_one(k: str) -> None:
+            nonlocal total_created
+            async with semaphore:
+                await self._execute_write(k)
+                total_created += 1
+                if progress_callback:
+                    try:
+                        progress_callback(total_created, len(all_seed_keys))
+                    except Exception:
+                        pass
+
+        tasks = [_seed_one(k) for k in all_seed_keys]
+        await asyncio.gather(*tasks, return_exceptions=True)
         return total_created
 
     def compute_pipeline_pool_size(self, target_qps: int) -> int:
@@ -291,7 +300,11 @@ class GCSLoadEngine:
 
         return found_keys
 
-    async def cleanup_all_objects(self, max_concurrency: Optional[int] = None) -> int:
+    async def cleanup_all_objects(
+        self,
+        max_concurrency: Optional[int] = None,
+        progress_callback: Optional[callable] = None,
+    ) -> int:
         """Delete all created test objects, seed objects, and leftover objects under prefix."""
         if max_concurrency is None or max_concurrency <= 0:
             max_concurrency = self.settings.get_effective_cleanup_concurrency()
@@ -303,10 +316,15 @@ class GCSLoadEngine:
             deleted_count = len(all_keys)
             self._created_keys.clear()
             self._seed_keys.clear()
+            if progress_callback:
+                try:
+                    progress_callback(deleted_count, deleted_count)
+                except Exception:
+                    pass
             return deleted_count
 
-        # Also sweep any objects under the key prefix base to catch leftover files from previous runs
-        if self.settings.key_prefix_base:
+        # Sweep objects under prefix if no known in-memory keys exist (e.g. standalone --clean-only mode)
+        if not all_keys and self.settings.key_prefix_base:
             listed_keys = await self.list_objects_by_prefix(self.settings.key_prefix_base)
             all_keys.update(listed_keys)
 
@@ -314,20 +332,29 @@ class GCSLoadEngine:
             return 0
 
         keys_list = list(all_keys)
+        total_keys = len(keys_list)
         deleted_count = 0
         semaphore = asyncio.Semaphore(max_concurrency)
 
         async def _bounded_delete(k: str) -> bool:
+            nonlocal deleted_count
             async with semaphore:
-                return await self._execute_delete(k)
+                success = await self._execute_delete(k)
+                if success:
+                    deleted_count += 1
+                if progress_callback:
+                    try:
+                        progress_callback(deleted_count, total_keys)
+                    except Exception:
+                        pass
+                return success
 
-        # Process in chunks of 1000
+        # Process in chunks of 1000 for efficient garbage collection
         chunk_size = 1000
-        for i in range(0, len(keys_list), chunk_size):
+        for i in range(0, total_keys, chunk_size):
             chunk = keys_list[i : i + chunk_size]
             tasks = [_bounded_delete(k) for k in chunk]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            deleted_count += sum(1 for r in results if r is True)
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         self._created_keys.clear()
         self._seed_keys.clear()

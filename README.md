@@ -54,7 +54,7 @@ All internal engine tuning parameters are automatically calculated from `TARGET_
 * **CPU Worker Processes (`NUM_WORKERS`)**: 1 worker per CPU core (`os.cpu_count()`).
 * **Persistent Coroutine Pool (`WORKER_POOL_SIZE`)**: Auto-sized via Little's Law ($\text{clamp}(\lceil \frac{Q}{N} \times 0.05 \rceil, 20, 500)$).
 * **TCP Connection Pool (`HTTP_MAX_CONNECTIONS`)**: Auto-sized per worker ($\max(200, \text{pool\_size} \times 2)$).
-* **Seed Objects per Shard (`SEED_OBJECTS_PER_PREFIX`)**: Auto-scaled to read workload ($\max(20, \lceil \frac{Q_r}{N_s} \times 0.1 \rceil)$).
+* **Seed Objects per Shard (`SEED_OBJECTS_PER_PREFIX`)**: Default 20 objects per shard (e.g., 320 objects across 16 shards, uploaded in < 1 second).
 * **Cleanup Parallelism (`CLEANUP_CONCURRENCY`)**: Auto-scaled to CPU cores ($\max(100, N_{\text{cpus}} \times 50)$).
 * **OS File Descriptor Tuning**: Auto-elevates `ulimit -n` to `65,535` via `resource.setrlimit`.
 

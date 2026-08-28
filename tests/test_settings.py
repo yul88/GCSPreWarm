@@ -82,8 +82,8 @@ def test_dynamic_settings_resolution():
     assert settings.get_effective_http_connections() == 200
 
     # 2. Seed count dynamic resolution
-    # 10,000 read QPS across 16 shards -> (10000 / 16) * 0.1 = 62.5 -> 62 seed objects
-    assert settings.get_effective_seed_count(total_shards=16) == 62
+    # 20 seed objects per shard
+    assert settings.get_effective_seed_count(total_shards=16) == 20
 
     # 3. Cleanup concurrency dynamic resolution
     # 8 workers * 50 = 400

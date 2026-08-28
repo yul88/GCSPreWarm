@@ -172,14 +172,13 @@ class Settings(BaseSettings):
         return max(200, min(2000, pool_size * 2))
 
     def get_effective_seed_count(self, total_shards: int) -> int:
-        """Dynamically compute seed object count per prefix shard based on read QPS scale."""
+        """Dynamically compute seed object count per prefix shard (default: 20 objects per shard)."""
         if self.seed_objects_per_prefix is not None and self.seed_objects_per_prefix > 0:
             return self.seed_objects_per_prefix
         if self.target_read_qps <= 0:
             return 20
-        shards = max(1, total_shards)
-        per_shard_qps = self.target_read_qps / shards
-        return max(20, min(200, int(per_shard_qps * 0.1)))
+        # 20 seed objects per shard is optimal for uniform partition read distribution
+        return 20
 
     def get_effective_cleanup_concurrency(self) -> int:
         """Dynamically compute cleanup delete concurrency based on CPU core count."""

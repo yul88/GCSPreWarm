@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from rich.console import Console
 from rich.live import Live
+from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeRemainingColumn
 
 from src.auth.gcp_auth import GCPAuthProvider, get_auth_provider
 from src.config.settings import Settings, get_settings
@@ -255,15 +256,34 @@ async def async_main(args: argparse.Namespace) -> int:
         # Phase 1: Seed Phase (If Target Read QPS > 0)
         # =====================================================================
         if settings.target_read_qps > 0 and not stop_event.is_set():
-            console.print("[cyan]🌱 Phase 1: Pre-populating seed objects for read pre-warm...[/cyan]")
             ramp_controller.phase = ExecutionPhase.SEEDING
             effective_seed_count = settings.get_effective_seed_count(len(partitioner.plan.prefixes))
-            seed_task = asyncio.create_task(seed_engine.seed_objects(effective_seed_count))
-            stop_task = asyncio.create_task(stop_event.wait())
-            done, pending = await asyncio.wait(
-                [seed_task, stop_task],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+            total_expected_seeds = len(partitioner.plan.prefixes) * effective_seed_count
+
+            with Progress(
+                TextColumn("[cyan]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                TimeRemainingColumn(),
+                console=console,
+            ) as progress:
+                seed_task_id = progress.add_task(
+                    f"🌱 Phase 1: Pre-populating {total_expected_seeds:,} seed objects across {len(partitioner.plan.prefixes)} shards...",
+                    total=total_expected_seeds,
+                )
+
+                def _on_seed_progress(completed: int, total: int):
+                    progress.update(seed_task_id, completed=completed)
+
+                seed_task = asyncio.create_task(
+                    seed_engine.seed_objects(effective_seed_count, progress_callback=_on_seed_progress)
+                )
+                stop_task = asyncio.create_task(stop_event.wait())
+                done, pending = await asyncio.wait(
+                    [seed_task, stop_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
             if stop_event.is_set():
                 seed_task.cancel()
                 console.print("[yellow]⚠️ Seeding cancelled by user.[/yellow]")
@@ -339,8 +359,24 @@ async def async_main(args: argparse.Namespace) -> int:
         seed_engine._created_keys = all_created_keys
 
         if settings.cleanup_on_finish and all_created_keys:
-            console.print("\n[bold cyan]🧹 Cleaning up created test objects...[/bold cyan]")
-            cleaned_objects = await seed_engine.cleanup_all_objects()
+            total_clean_keys = len(all_created_keys)
+            with Progress(
+                TextColumn("[cyan]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                TimeRemainingColumn(),
+                console=console,
+            ) as progress:
+                clean_task_id = progress.add_task(
+                    f"🧹 Cleaning up {total_clean_keys:,} test objects...",
+                    total=total_clean_keys,
+                )
+
+                def _on_clean_progress(completed: int, total: int):
+                    progress.update(clean_task_id, completed=completed)
+
+                cleaned_objects = await seed_engine.cleanup_all_objects(progress_callback=_on_clean_progress)
+
             console.print(f"[green]✓ Cleaned up {cleaned_objects:,} objects.[/green]")
 
         await seed_engine.close()
