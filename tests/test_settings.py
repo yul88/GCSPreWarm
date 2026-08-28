@@ -108,3 +108,34 @@ def test_dynamic_settings_resolution():
     settings.seed_objects_per_prefix = 50
     assert settings.get_effective_seed_count(total_shards=16) == 50
 
+
+def test_write_key_pool_configuration():
+    """Test WRITE_KEY_POOL boolean flag, numeric sizing, and dynamic auto-calculation."""
+    # 1. Default: use_write_key_pool=True, write_key_pool_size=None (Auto)
+    s_default = Settings(gcs_bucket_name="test-bucket", target_write_qps=5000)
+    assert s_default.use_write_key_pool is True
+    assert s_default.write_key_pool_size is None
+    # 5000 QPS across 16 shards -> 4096 keys/shard
+    assert s_default.get_effective_write_key_pool_size(total_shards=16) == 4096
+
+    # 2. Disabled via boolean: use_write_key_pool=False -> returns 0
+    s_disabled = Settings(gcs_bucket_name="test-bucket", target_write_qps=5000, use_write_key_pool=False)
+    assert s_disabled.use_write_key_pool is False
+    assert s_disabled.get_effective_write_key_pool_size(total_shards=16) == 0
+
+    # 3. Parsed from write_key_pool string "false" / "0" / "no"
+    s_env_false = Settings(gcs_bucket_name="test-bucket", target_write_qps=5000, write_key_pool="false")
+    assert s_env_false.use_write_key_pool is False
+    assert s_env_false.get_effective_write_key_pool_size(total_shards=16) == 0
+
+    s_env_zero = Settings(gcs_bucket_name="test-bucket", target_write_qps=5000, write_key_pool="0")
+    assert s_env_zero.use_write_key_pool is False
+    assert s_env_zero.get_effective_write_key_pool_size(total_shards=16) == 0
+
+    # 4. Parsed from write_key_pool numeric override string "256"
+    s_env_num = Settings(gcs_bucket_name="test-bucket", target_write_qps=5000, write_key_pool="256")
+    assert s_env_num.use_write_key_pool is True
+    assert s_env_num.write_key_pool_size == 256
+    assert s_env_num.get_effective_write_key_pool_size(total_shards=16) == 256
+
+

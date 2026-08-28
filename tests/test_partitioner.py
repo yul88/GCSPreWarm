@@ -109,15 +109,25 @@ def test_write_and_seed_key_generation():
     assert write_key1.startswith(prefix)
     assert write_key1.endswith(".dat")
     assert write_key1 != write_key2
-    assert write_key1 == f"{prefix}slot_00.dat"
-    assert write_key2 == f"{prefix}slot_01.dat"
+    assert write_key1 == f"{prefix}slot_000.dat"
+    assert write_key2 == f"{prefix}slot_001.dat"
 
-    # Infinite unique mode
+    # Explicit 256 pool size
+    settings_256 = Settings(
+        gcs_bucket_name="test-bucket",
+        target_write_qps=1000,
+        target_read_qps=1000,
+        write_key_pool_size=256,
+    )
+    partitioner_256 = KeyPartitioner(settings_256)
+    assert partitioner_256.generate_write_key(prefix, slot_index=0) == f"{prefix}slot_00.dat"
+
+    # Infinite unique mode (use_write_key_pool=False)
     settings_inf = Settings(
         gcs_bucket_name="test-bucket",
         target_write_qps=1000,
         target_read_qps=1000,
-        write_key_pool_size=0,
+        use_write_key_pool=False,
     )
     partitioner_inf = KeyPartitioner(settings_inf)
     write_key_inf1 = partitioner_inf.generate_write_key(prefix)

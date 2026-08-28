@@ -91,17 +91,50 @@ class Settings(BaseSettings):
         default=True,
         description="Automatically delete created test objects upon completion.",
     )
-    write_key_pool_size: int = Field(
-        default=256,
+    use_write_key_pool: bool = Field(
+        default=True,
+        description="Enable bounded rotating write key pool (default: True). Overwriting rotating keys generates 100% full GCS write load and triggers partition splitting while capping total objects to ~65k for <3s cleanup. Set to False for infinite unique keys.",
+    )
+    write_key_pool_size: Optional[int] = Field(
+        default=None,
         ge=0,
-        description="Rotating write key pool size per shard (0 for infinite unique keys, default: 256 keys/shard, e.g. 00-ff in HEX mode). "
-                    "Overwriting a rotating key pool triggers 100% full GCS write throughput and partition splitting "
-                    "while capping total created objects to ~4,096, allowing instantaneous (<1-2s) cleanup.",
+        description="Optional manual override for rotating write key pool size per shard (default: dynamically auto-calculated "
+                    "from Target Write QPS and Shard count to guarantee <= 0.10 writes/s per object, e.g. 4096 in HEX mode).",
     )
     keep_warm_mode: bool = Field(
         default=False,
         description="Maintain low-rate heartbeat traffic after test completes to keep shards warm.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_write_key_pool_env(cls, values):
+        """Allow WRITE_KEY_POOL to accept boolean flags or numeric pool size overrides."""
+        if isinstance(values, dict):
+            val = values.get("write_key_pool")
+            if val is not None:
+                if isinstance(val, bool):
+                    values["use_write_key_pool"] = val
+                elif isinstance(val, str):
+                    lower = val.strip().lower()
+                    if lower in ("true", "1", "yes", "on"):
+                        values["use_write_key_pool"] = True
+                    elif lower in ("false", "0", "no", "off"):
+                        values["use_write_key_pool"] = False
+                    elif lower.isdigit():
+                        num = int(lower)
+                        if num == 0:
+                            values["use_write_key_pool"] = False
+                        else:
+                            values["use_write_key_pool"] = True
+                            values["write_key_pool_size"] = num
+                elif isinstance(val, int):
+                    if val == 0:
+                        values["use_write_key_pool"] = False
+                    else:
+                        values["use_write_key_pool"] = True
+                        values["write_key_pool_size"] = val
+        return values
 
     # =========================================================================
     # Engine & Network Tuning Parameters (Dynamic with Manual Overrides)
@@ -166,6 +199,42 @@ class Settings(BaseSettings):
         default=None,
         description="Optional manual override for seed objects per shard (default: auto-sized from Read QPS scale).",
     )
+
+    def get_effective_write_key_pool_size(self, total_shards: int) -> int:
+        """Dynamically compute rotating write key pool size per shard from Target Write QPS.
+
+        Co-designed with prefix shard count to bound the write rate to any single object to <= 0.10
+        writes/second (at least 10s between overwrites of the same object), eliminating GCS 1 write/sec
+        object immutability rate limiting while capping total created objects and enabling <3s cleanup.
+        """
+        if not self.use_write_key_pool:
+            return 0
+        if self.write_key_pool_size is not None:
+            return self.write_key_pool_size
+        if self.target_write_qps <= 0:
+            return 256
+
+        import math
+
+        total_shards = max(1, total_shards)
+        qps_per_shard = self.target_write_qps / total_shards
+        # Target write rate per object <= 0.10 writes/second (10 seconds between overwrites)
+        needed_pool = max(256, int(math.ceil(qps_per_shard * 10.0)))
+
+        if self.key_strategy == "HEX":
+            if needed_pool <= 256:
+                return 256
+            elif needed_pool <= 4096:
+                return 4096
+            elif needed_pool <= 65536:
+                return 65536
+            else:
+                bits = (needed_pool - 1).bit_length()
+                hex_bits = ((bits + 3) // 4) * 4
+                return 1 << hex_bits
+        else:
+            bits = (needed_pool - 1).bit_length()
+            return 1 << max(8, bits)
 
     def get_safe_min_concurrency_per_worker(self) -> int:
         """Compute minimum coroutine concurrency per worker ensuring low-overhead responsiveness."""

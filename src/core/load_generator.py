@@ -262,10 +262,10 @@ class GCSLoadEngine:
 
         prefixes = self.plan.prefixes
         num_prefixes = len(prefixes)
+        pool_size_per_shard = self.settings.get_effective_write_key_pool_size(num_prefixes)
         min_safe = self.settings.get_safe_min_concurrency_per_worker()
 
-        async def _write_worker_loop(worker_idx: int):
-            idx = worker_idx
+        async def _write_worker_loop():
             while self._is_running:
                 # If target pool scaled down, exit gracefully
                 if len(self._write_workers) > self._target_write_pool and self._target_write_pool >= min_safe:
@@ -273,22 +273,20 @@ class GCSLoadEngine:
                 await self.write_limiter.acquire()
                 if not self._is_running:
                     break
-                prefix = prefixes[idx % num_prefixes]
-                slot = idx % self.settings.write_key_pool_size if self.settings.write_key_pool_size > 0 else None
-                idx += 1
+                prefix = prefixes[random.randint(0, num_prefixes - 1)]
+                slot = random.randint(0, pool_size_per_shard - 1) if pool_size_per_shard > 0 else None
                 key = self.partitioner.generate_write_key(prefix, slot_index=slot)
                 await self._execute_write(key)
 
-        for i in range(pool_size):
-            t = asyncio.create_task(_write_worker_loop(i))
+        for _ in range(pool_size):
+            t = asyncio.create_task(_write_worker_loop())
             self._write_workers.append(t)
             self._worker_coros.append(t)
 
         while self._is_running:
             self._write_workers = [t for t in self._write_workers if not t.done()]
             while len(self._write_workers) < self._target_write_pool and self._is_running:
-                idx = len(self._write_workers)
-                t = asyncio.create_task(_write_worker_loop(idx))
+                t = asyncio.create_task(_write_worker_loop())
                 self._write_workers.append(t)
                 self._worker_coros.append(t)
             try:

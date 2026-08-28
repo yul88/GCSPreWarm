@@ -111,8 +111,23 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--write-key-pool",
+        dest="write_key_pool",
+        action="store_true",
+        default=None,
+        help="Enable bounded rotating write key pool (enabled by default). Overwriting a rotating pool triggers 100%% full GCS write load and partition splitting while enabling instant (<3s) cleanup.",
+    )
+    parser.add_argument(
+        "--no-write-key-pool",
+        "--unique-keys",
+        dest="write_key_pool",
+        action="store_false",
+        help="Disable rotating key pool; generate infinite unique timestamped objects on every write.",
+    )
+    parser.add_argument(
+        "--write-key-pool-size",
         type=int,
-        help="Rotating write key pool size per shard (default 256 keys/shard). Overwriting a bounded pool triggers 100%% full GCS write load while enabling instant (<1-2s) cleanup. Set to 0 for infinite unique keys.",
+        default=None,
+        help="Manual override for write key pool size per shard (default: dynamically auto-sized from Target Write QPS and Shard count).",
     )
     parser.add_argument(
         "--keep-warm",
@@ -152,7 +167,10 @@ async def async_main(args: argparse.Namespace) -> int:
     if args.workers is not None:
         settings.num_workers = args.workers
     if args.write_key_pool is not None:
-        settings.write_key_pool_size = args.write_key_pool
+        settings.use_write_key_pool = args.write_key_pool
+    if args.write_key_pool_size is not None:
+        settings.write_key_pool_size = args.write_key_pool_size
+        settings.use_write_key_pool = True
     if args.cleanup is not None:
         settings.cleanup_on_finish = args.cleanup
     if args.keep_warm:

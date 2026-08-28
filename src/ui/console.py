@@ -57,12 +57,14 @@ class ConsoleDashboard:
             "Base path inside bucket",
         )
         if plan.target_write_qps > 0:
-            if settings.write_key_pool_size > 0:
-                total_slots = plan.total_allocated_shards * settings.write_key_pool_size
+            eff_pool = settings.get_effective_write_key_pool_size(plan.total_allocated_shards)
+            if eff_pool > 0:
+                total_slots = plan.total_allocated_shards * eff_pool
                 writes_per_slot = plan.target_write_qps / total_slots
+                pool_desc = f"{eff_pool:,} keys/shard" + (" (Auto)" if settings.write_key_pool_size is None else " (Manual)")
                 table.add_row(
                     "Write Key Pool",
-                    f"{settings.write_key_pool_size} keys/shard",
+                    pool_desc,
                     f"{total_slots:,} total rotating slots (~{writes_per_slot:.2f} writes/s/key)",
                 )
             else:
@@ -166,30 +168,33 @@ class ConsoleDashboard:
         if settings.target_write_qps <= 0:
             return True
 
-        if settings.write_key_pool_size == 0:
+        if not settings.use_write_key_pool or settings.write_key_pool_size == 0:
             total_est_objects = settings.target_write_qps * max(60, settings.sustain_duration_seconds)
             notice_text = (
-                f"[bold yellow]ℹ️ Infinite Unique Keys Mode Active (`WRITE_KEY_POOL_SIZE=0`)[/bold yellow]\n\n"
+                f"[bold yellow]ℹ️ Infinite Unique Keys Mode Active (`WRITE_KEY_POOL=false`)[/bold yellow]\n\n"
                 f"• Every write request generates a brand new timestamped object.\n"
                 f"• Estimated Objects Created: [bold red]~{total_est_objects:,} objects[/bold red]\n"
                 f"• [bold white]Cleanup Impact:[/bold white] Post-test cleanup requires 1 HTTP DELETE per object "
                 f"and may take [bold yellow]several minutes to over an hour[/bold yellow].\n\n"
-                f"[bold cyan]💡 Recommendation:[/bold cyan] Set [bold green]WRITE_KEY_POOL_SIZE=256[/bold green] "
-                f"to cap total objects to ~{total_shards * 256:,} while achieving 100% full write QPS and <2s cleanup."
+                f"[bold cyan]💡 Recommendation:[/bold cyan] Enable [bold green]WRITE_KEY_POOL=true[/bold green] "
+                f"for auto-calculated pool size to achieve 100% write QPS and <3s cleanup."
             )
             self.console.print(Panel(notice_text, title="ℹ️ Key Generation Mode Notice", border_style="yellow"))
             self.console.print()
             return True
 
         total_shards = max(1, total_shards)
-        pool_size = settings.write_key_pool_size
+        pool_size = settings.get_effective_write_key_pool_size(total_shards)
+        if pool_size <= 0:
+            return True
+
         total_slots = total_shards * pool_size
         est_writes_per_slot = settings.target_write_qps / total_slots
 
-        # GCS quota limit is roughly 1 write per second to the same object name; warn if significantly exceeded (>2.0/s)
-        if est_writes_per_slot > 2.0:
-            min_recommended_pool = max(16, math.ceil(settings.target_write_qps / total_shards))
-            suggested_pool = 256 if (settings.key_strategy == "HEX" and min_recommended_pool <= 256) else min_recommended_pool
+        # GCS quota limit is 1 write per second to the same object name; warn if exceeded (>1.0/s)
+        if est_writes_per_slot > 1.0:
+            min_recommended_pool = max(256, math.ceil(settings.target_write_qps / total_shards * 10))
+            suggested_pool = 4096 if (settings.key_strategy == "HEX" and min_recommended_pool <= 4096) else min_recommended_pool
 
             warning_text = (
                 f"[bold yellow]⚠️ WRITE_KEY_POOL_SIZE Sizing Warning[/bold yellow]\n\n"

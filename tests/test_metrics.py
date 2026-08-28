@@ -91,12 +91,11 @@ def test_check_write_key_pool_capacity():
 
     dashboard = ConsoleDashboard()
 
-    # 1. Safe configuration: 5,000 Write QPS across 16 shards with 256 slots (~1.2 writes/s)
+    # 1. Safe auto-calculated configuration: 5,000 Write QPS across 16 shards (Auto 4,096 slots -> ~0.08 writes/s)
     settings_safe = Settings(
         gcs_bucket_name="test-bucket",
         target_write_qps=5000,
         target_read_qps=0,
-        write_key_pool_size=256,
     )
     assert dashboard.check_write_key_pool_capacity(settings_safe, total_shards=16) is True
 
@@ -117,4 +116,12 @@ def test_check_write_key_pool_capacity():
         write_key_pool_size=10,
     )
     assert dashboard.check_write_key_pool_capacity(settings_read_only, total_shards=16) is True
+
+    # 4. Infinite unique mode (use_write_key_pool=False)
+    settings_inf = Settings(
+        gcs_bucket_name="test-bucket",
+        target_write_qps=5000,
+        use_write_key_pool=False,
+    )
+    assert dashboard.check_write_key_pool_capacity(settings_inf, total_shards=16) is True
 

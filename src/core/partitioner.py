@@ -160,15 +160,24 @@ class KeyPartitioner:
         )
 
     def generate_write_key(self, prefix_shard: str, slot_index: Optional[int] = None) -> str:
-        """Generate an object key within a given prefix shard, supporting rotating key pool."""
-        if self.settings.write_key_pool_size > 0:
+        """Generate an object key within a given prefix shard, supporting dynamic rotating key pool."""
+        pool_size = self.settings.get_effective_write_key_pool_size(len(self.plan.prefixes))
+        if pool_size > 0:
             if slot_index is None:
-                slot_index = random.randint(0, self.settings.write_key_pool_size - 1)
+                slot_index = random.randint(0, pool_size - 1)
             else:
-                slot_index = slot_index % self.settings.write_key_pool_size
+                slot_index = slot_index % pool_size
 
             if self.settings.key_strategy == "HEX":
-                return f"{prefix_shard}slot_{slot_index:02x}.dat"
+                if pool_size <= 256:
+                    hex_digits = 2
+                elif pool_size <= 4096:
+                    hex_digits = 3
+                elif pool_size <= 65536:
+                    hex_digits = 4
+                else:
+                    hex_digits = max(2, (pool_size - 1).bit_length() // 4 + 1)
+                return f"{prefix_shard}slot_{slot_index:0{hex_digits}x}.dat"
             return f"{prefix_shard}test_obj_{slot_index:04d}.dat"
 
         # Infinite unique keys mode
