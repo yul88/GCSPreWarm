@@ -5,6 +5,7 @@ for HEX, ALPHANUMERIC, and CUSTOM customer key structures.
 """
 
 import math
+import random
 import re
 import string
 import time

@@ -125,3 +125,91 @@ def test_check_write_key_pool_capacity():
     )
     assert dashboard.check_write_key_pool_capacity(settings_inf, total_shards=16) is True
 
+
+def test_print_summary_readiness_evaluation():
+    """Verify print_summary correctly handles full success and partial pre-warm warnings."""
+    from src.config.settings import Settings
+    from src.core.metrics import MetricSnapshot
+    from src.ui.console import ConsoleDashboard
+
+    dashboard = ConsoleDashboard()
+
+    settings = Settings(
+        gcs_bucket_name="test-bucket",
+        target_read_qps=10000,
+        target_write_qps=5000,
+    )
+
+    # 1. Full Target Achieved (15,000 QPS)
+    full_snapshot = MetricSnapshot(
+        timestamp=100.0,
+        elapsed_seconds=120.0,
+        current_read_qps=10000.0,
+        current_write_qps=5000.0,
+        current_total_qps=15000.0,
+        total_read_ops=100000,
+        total_write_ops=50000,
+        total_ops=150000,
+        window_2xx=15000,
+        window_429=0,
+        window_503=0,
+        window_5xx=0,
+        window_errors=0,
+        cum_2xx=150000,
+        cum_429=0,
+        cum_503=0,
+        cum_5xx=0,
+        cum_errors=0,
+        p50_latency_ms=10.0,
+        p95_latency_ms=15.0,
+        p99_latency_ms=20.0,
+        max_latency_ms=25.0,
+        read_p50_latency_ms=5.0,
+        read_p95_latency_ms=10.0,
+        read_p99_latency_ms=15.0,
+        write_p50_latency_ms=12.0,
+        write_p95_latency_ms=18.0,
+        write_p99_latency_ms=22.0,
+        throttling_rate=0.0,
+        error_rate=0.0,
+    )
+    # Should run cleanly
+    dashboard.print_summary(full_snapshot, cleaned_up_objects=65536, settings=settings)
+
+    # 2. Partial Target (e.g. 8,104 / 15,000 QPS = 54%)
+    partial_snapshot = MetricSnapshot(
+        timestamp=100.0,
+        elapsed_seconds=120.0,
+        current_read_qps=6720.0,
+        current_write_qps=1384.0,
+        current_total_qps=8104.0,
+        total_read_ops=80000,
+        total_write_ops=20000,
+        total_ops=100000,
+        window_2xx=8104,
+        window_429=0,
+        window_503=0,
+        window_5xx=0,
+        window_errors=0,
+        cum_2xx=100000,
+        cum_429=0,
+        cum_503=0,
+        cum_5xx=0,
+        cum_errors=0,
+        p50_latency_ms=270.0,
+        p95_latency_ms=450.0,
+        p99_latency_ms=480.0,
+        max_latency_ms=500.0,
+        read_p50_latency_ms=270.0,
+        read_p95_latency_ms=450.0,
+        read_p99_latency_ms=480.0,
+        write_p50_latency_ms=270.0,
+        write_p95_latency_ms=450.0,
+        write_p99_latency_ms=480.0,
+        throttling_rate=0.0,
+        error_rate=0.0,
+    )
+    # Should run cleanly and render partial pre-warm notice
+    dashboard.print_summary(partial_snapshot, cleaned_up_objects=65536, settings=settings)
+
+

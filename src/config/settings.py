@@ -111,29 +111,30 @@ class Settings(BaseSettings):
     def parse_write_key_pool_env(cls, values):
         """Allow WRITE_KEY_POOL to accept boolean flags or numeric pool size overrides."""
         if isinstance(values, dict):
-            val = values.get("write_key_pool")
-            if val is not None:
-                if isinstance(val, bool):
-                    values["use_write_key_pool"] = val
-                elif isinstance(val, str):
-                    lower = val.strip().lower()
-                    if lower in ("true", "1", "yes", "on"):
-                        values["use_write_key_pool"] = True
-                    elif lower in ("false", "0", "no", "off"):
-                        values["use_write_key_pool"] = False
-                    elif lower.isdigit():
-                        num = int(lower)
-                        if num == 0:
+            if "use_write_key_pool" not in values:
+                val = values.get("write_key_pool")
+                if val is not None:
+                    if isinstance(val, bool):
+                        values["use_write_key_pool"] = val
+                    elif isinstance(val, str):
+                        lower = val.strip().lower()
+                        if lower in ("true", "1", "yes", "on"):
+                            values["use_write_key_pool"] = True
+                        elif lower in ("false", "0", "no", "off"):
+                            values["use_write_key_pool"] = False
+                        elif lower.isdigit():
+                            num = int(lower)
+                            if num == 0:
+                                values["use_write_key_pool"] = False
+                            else:
+                                values["use_write_key_pool"] = True
+                                values["write_key_pool_size"] = num
+                    elif isinstance(val, int):
+                        if val == 0:
                             values["use_write_key_pool"] = False
                         else:
                             values["use_write_key_pool"] = True
-                            values["write_key_pool_size"] = num
-                elif isinstance(val, int):
-                    if val == 0:
-                        values["use_write_key_pool"] = False
-                    else:
-                        values["use_write_key_pool"] = True
-                        values["write_key_pool_size"] = val
+                            values["write_key_pool_size"] = val
         return values
 
     # =========================================================================

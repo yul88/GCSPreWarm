@@ -445,7 +445,7 @@ async def async_main(args: argparse.Namespace) -> int:
             throttling_rate=0.0,
             error_rate=0.0,
         )
-    dashboard.print_summary(final_snapshot, cleaned_objects)
+    dashboard.print_summary(final_snapshot, cleaned_objects, settings=settings)
     return 0
 
 
