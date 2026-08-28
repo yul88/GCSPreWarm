@@ -24,13 +24,13 @@
 | `PREFIX_TEMPLATE` | `str` | `""` | Sequence template for prefixes (e.g., `tenant_{001..050}/`). |
 | `KEY_PREFIX_BASE` | `str` | `"gcs_prewarm_test/"` | Base path/directory inside the bucket (e.g., `app_v1/` or `""` for root). |
 | `WRITE_KEY_POOL` | `bool` | `true` | Enable bounded rotating write key pool (default `true`). Auto-sizes pool to guarantee <= 0.1 writes/s/key, enabling <3s cleanup. Set `false` for unique keys. |
-| `WRITE_KEY_POOL_SIZE` | `int` | `None (Auto)` | Optional manual override for rotating write key pool size per shard (e.g., 4096). |
 | `CLEANUP_ON_FINISH` | `bool` | `true` | Asynchronously delete created test objects after completion. |
 | `KEEP_WARM_MODE` | `bool` | `false` | Continue low-rate heartbeat traffic to maintain split shards. |
 
 ### 2.2 Centralized System Defaults (`src/config/settings.py`)
 | Parameter | Type | Default | Dynamic Computation & Description |
 | :--- | :--- | :--- | :--- |
+| `WRITE_KEY_POOL_SIZE` | `int` | `Dynamic` | Auto-sized pool per shard: $\max(256, \lceil \frac{Q_w}{N_{\text{shards}}} \times 10 \rceil)$ (rounded to hex powers, e.g. 4096). |
 | `GCS_BASE_URL` | `str` | `https://storage.googleapis.com` | Base GCS REST/XML API endpoint. |
 | `NUM_WORKERS` | `int` | `CPU Cores` | Auto-detected CPU cores (`os.cpu_count()`). 1 worker process per core. |
 | `WORKER_POOL_SIZE` | `int` | `Dynamic` | Auto-sized coroutines per process: $\text{clamp}(\lceil \frac{Q_{\text{target}}}{N_{\text{cpus}}} \times 0.05 \rceil, 20, 500)$. |
@@ -145,7 +145,7 @@ $$\text{Keys per Shard} = \max\left(256, \left\lceil \frac{Q_{\text{write}}}{N_{
 * **Target Mutation Rate**: Bounds write rate to $\le 0.10\text{ writes/sec per object}$ (overwritten at most once every 10–15 seconds).
 * **Randomized Uniform Distribution**: Workers select shards and slots via independent uniform random distributions, completely preventing harmonic multi-process lockstep collisions.
 * **Pre-Flight Warning**: If a manual override sets `WRITE_KEY_POOL_SIZE` so low that writes/sec/object exceeds $1.0/\text{s}$, the pre-flight check alerts the user and suggests the minimum safe pool size.
-* **Infinite Mode Notice**: If `WRITE_KEY_POOL_SIZE = 0`, alerts the user about expected million-object creation and prolonged cleanup times.
+* **Infinite Mode Notice**: If `WRITE_KEY_POOL = false` (or `WRITE_KEY_POOL_SIZE = 0`), alerts the user about expected million-object creation and prolonged cleanup times.
 
 ---
 

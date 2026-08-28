@@ -46,13 +46,13 @@ A lightweight, high-performance Python utility designed to help Google Cloud Pla
 * `CUSTOM_PREFIXES`: Comma-separated list of customer prefixes (e.g., `users/,orders/,media/,events/`).
 * `PREFIX_TEMPLATE`: Sequence template for customer prefixes (e.g., `tenant_{001..050}/`).
 * `KEY_PREFIX_BASE`: Base folder path inside the bucket (e.g., `gcs_prewarm_test/` or empty `""` for bucket root).
-* `WRITE_KEY_POOL`: Enable bounded rotating write key pool (`true`/`false`, default: `true`). When enabled, the key pool size is **dynamically co-designed with shard count** ($\le 0.10\text{ writes/s per object}$, e.g. 4,096 keys/shard) to prevent GCS 1 write/s object immutability locks while capping objects to ~65k for <3s cleanup. Set `false` for infinite unique keys.
-* `WRITE_KEY_POOL_SIZE`: (Optional) Manual override for rotating write key pool size per shard (e.g., `4096`).
+* `WRITE_KEY_POOL`: Enable bounded rotating write key pool (`true`/`false`, default: `true`). When enabled, key pool size per shard is dynamically co-designed with prefix shards ($\le 0.10\text{ writes/s per object}$, e.g. 4,096 keys/shard) to prevent GCS 1 write/s object immutability locks while capping objects to ~65k for <3s cleanup. Set `false` for infinite unique keys.
 * `CLEANUP_ON_FINISH`: Automatically delete created test objects after run (`true`/`false`).
 * `KEEP_WARM_MODE`: Keep sending heartbeat traffic after test finishes to sustain splits (`true`/`false`).
 
 ### 2. 100% Dynamic Engine Tuning (`src/config/settings.py`)
 All internal engine tuning parameters are automatically calculated from `TARGET_READ_QPS`, `TARGET_WRITE_QPS`, and the VM's CPU core count:
+* **Rotating Write Key Pool Size (`WRITE_KEY_POOL_SIZE`)**: Auto-calculated dynamically to guarantee $\le 0.10\text{ writes/s per object}$ ($K = \max(256, \lceil \frac{Q_w}{N_{\text{shards}}} \times 10 \rceil)$, e.g., 4,096 in HEX mode).
 * **CPU Worker Processes (`NUM_WORKERS`)**: 1 worker per CPU core (`os.cpu_count()`).
 * **Real-Time Latency-Adaptive Coroutine Pool (`WORKER_POOL_SIZE`)**: Auto-sized via Little's Law and continuously auto-tuned in real time from live p95 latency telemetry ($\text{Pool} \propto Q_{\text{target}} \times \text{Latency}_{\text{p95}}$), bounded by platform safety limits (`min 20/50`, `max 500`).
 * **TCP Connection Pool (`HTTP_MAX_CONNECTIONS`)**: Auto-sized per worker process ($\max(500, \min(\text{MaxSafe} \times 2, 2000))$) to prevent OS socket exhaustion.
@@ -285,6 +285,6 @@ GCSPreWarm/
 | 2026-08-28 | **100% Dynamic Parameter Auto-Tuning** | All engine parameters (CPU workers, worker pool size, TCP connection limits, seed object counts, cleanup deletion concurrency, sharding allocation, ramp durations) are now **dynamically calculated from user Target QPS and VM CPU core count**, with optional manual overrides. |
 | 2026-08-28 | **Pre-Flight Hardware Capacity Check** | Automatically verifies whether the execution environment (Cloud Shell vs GCE VM cores) can sustain the requested target QPS ($\sim 2,500\text{ QPS/vCPU}$), alerting the user and providing specific machine sizing recommendations if under-provisioned. |
 | 2026-08-28 | **Independent Read/Write Latency Auto-Tuning** | The engine independently monitors `read_p95_latency_ms` and `write_p95_latency_ms`, auto-scaling Read and Write coroutine worker pools separately to absorb write commit latency while keeping read pools lean. |
-| 2026-08-28 | **Dynamic Write Key Pool & 429 Prevention** | Implemented dynamic auto-sizing for `WRITE_KEY_POOL_SIZE` ($\le 0.10\text{ writes/s/object}$, e.g. 4,096 keys/shard) and randomized uniform distribution across worker coroutines, completely eliminating GCS 1 write/s object immutability locks and multi-process harmonic collisions while capping total objects to ~65k for <3s cleanup. |
-| 2026-08-28 | **Pre-Flight Write Key Pool & Rate Check** | Added automated pre-flight check validating `WRITE_KEY_POOL_SIZE` against GCS's 1 write/sec per object limit, alerting users if pool size is undersized for configured QPS or in infinite object mode. |
+| 2026-08-28 | **Dynamic Write Key Pool & 429 Prevention** | Set `WRITE_KEY_POOL` as a boolean default `true` with dynamic auto-sizing ($\le 0.10\text{ writes/s/object}$, e.g. 4,096 keys/shard) and randomized uniform distribution across worker coroutines, completely eliminating GCS 1 write/s object immutability locks and multi-process harmonic collisions while capping total objects to ~65k for <3s cleanup. |
+| 2026-08-28 | **Pre-Flight Write Key Pool & Rate Check** | Added automated pre-flight check validating `WRITE_KEY_POOL` against GCS's 1 write/sec per object limit, alerting users if pool size is undersized for configured QPS or in infinite object mode. |
 | 2026-08-26 | **Full Implementation & Tests** | Complete async load engine, token-bucket rate limiter, metrics collector, CLI, and unit test suite verified. |
