@@ -253,6 +253,7 @@ GCSPreWarm/
 │   └── main.py               # CLI entrypoint
 └── tests/
     ├── __init__.py
+    ├── test_auth.py
     ├── test_load_generator.py
     ├── test_metrics.py
     ├── test_partitioner.py

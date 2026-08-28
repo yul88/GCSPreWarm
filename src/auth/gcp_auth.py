@@ -130,7 +130,7 @@ class GCPAuthProvider:
             return {"Authorization": "Bearer mock-bearer-token-for-dry-run"}
 
         now_mono = time.monotonic()
-        # Fast path: return cached header dict without lock or datetime allocations
+        # Fast path: return cached header dict if refreshed recently
         if (
             self._cached_headers
             and (now_mono - self._last_refresh_mono < 60.0)
@@ -138,26 +138,18 @@ class GCPAuthProvider:
         ):
             return self._cached_headers
 
-        async with self._lock:
-            # Recheck inside lock
-            if (
-                self._cached_headers
-                and (now_mono - self._last_refresh_mono < 60.0)
-                and (self._cached_project_id == project_id)
-            ):
-                return self._cached_headers
+        token = await self.get_bearer_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "GCSPreWarm/1.0",
+        }
+        if project_id and project_id.strip():
+            headers["x-goog-user-project"] = project_id.strip()
 
-            token = await self.get_bearer_token()
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "User-Agent": "GCSPreWarm/1.0",
-            }
-            if project_id and project_id.strip():
-                headers["x-goog-user-project"] = project_id.strip()
-            self._cached_headers = headers
-            self._cached_project_id = project_id
-            self._last_refresh_mono = time.monotonic()
-            return self._cached_headers
+        self._cached_headers = headers
+        self._cached_project_id = project_id
+        self._last_refresh_mono = time.monotonic()
+        return self._cached_headers
 
 
 _auth_provider_instance: Optional[GCPAuthProvider] = None
