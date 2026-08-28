@@ -138,15 +138,26 @@ Prior to execution, the engine validates whether the current execution platform 
 ---
 
 ## 7. High-Throughput Engine Optimizations
-1. **Independent Read & Write Latency-Adaptive Coroutine Pipelines**:
-   * Sized dynamically per worker process based on Little's Law with independent operation-specific latency feedback:
-     $$\text{Read Pool Size} = \text{clamp}\left(\left\lceil \frac{Q_{\text{read}}}{N_{\text{workers}}} \times \max\left(0.020, \min\left(1.0, \frac{\text{Read Latency}_{\text{p95}}}{1000} \times 1.5\right)\right) \right\rceil, \text{min}=20/50, \text{max}=500\right)$$
-     $$\text{Write Pool Size} = \text{clamp}\left(\left\lceil \frac{Q_{\text{write}}}{N_{\text{workers}}} \times \max\left(0.020, \min\left(1.0, \frac{\text{Write Latency}_{\text{p95}}}{1000} \times 1.5\right)\right) \right\rceil, \text{min}=20/50, \text{max}=500\right)$$
-   * Continuously measures live `read_p95_latency_ms` and `write_p95_latency_ms` separately, automatically expanding the write pool to absorb distributed commit delays while keeping read pools lean and memory-efficient.
-2. **Streaming Parallel Shard Deletion Engine**:
-   * Queries all prefix partitions (`gcs_prewarm_test/0/` through `f/`) concurrently in parallel. Streams object keys from pagination pages directly into bounded deletion tasks without buffering millions of keys in RAM, rendering a live progress counter throughout Phase 5 cleanup.
-3. **C-Based `uvloop` Event Loop**: Automatically attaches `uvloop` (libuv C-engine) on Linux/macOS for 2x–3x higher event loop throughput.
-4. **Cached Authorization Headers**: Proactively caches OAuth2 header dictionaries in memory with non-blocking refresh, eliminating 15,000+ dictionary allocations per second.
-5. **Lock-Free Concurrency**: Leverages `aiohttp.TCPConnector` native connection limits, eliminating redundant Python semaphores and lock contention.
-6. **Direct Socket Tuning**: Enables `TCP_NODELAY` and HTTP Keep-Alive pooling for immediate packet dispatch without OS buffer delay.
+
+### 7.1 Independent Read & Write Latency-Adaptive Coroutine Pipelines
+Worker coroutine pools are dynamically auto-sized per worker process based on Little's Law with separate real-time latency feedback for GET and PUT operations:
+
+$$\text{Read Pool Size} = \text{clamp}\left(\left\lceil \frac{Q_{\text{read}}}{N_{\text{workers}}} \times \left(\frac{L_{r,\text{p95}}}{1000} \times 1.5\right) \right\rceil, \text{min}=20, \text{max}=500\right)$$
+
+$$\text{Write Pool Size} = \text{clamp}\left(\left\lceil \frac{Q_{\text{write}}}{N_{\text{workers}}} \times \left(\frac{L_{w,\text{p95}}}{1000} \times 1.5\right) \right\rceil, \text{min}=20, \text{max}=500\right)$$
+
+* $Q_{\text{read}}$, $Q_{\text{write}}$: Target Read and Write QPS.
+* $N_{\text{workers}}$: Number of active worker processes (CPU cores).
+* $L_{r,\text{p95}}$, $L_{w,\text{p95}}$: Observed real-time p95 latency (in milliseconds) for Read and Write requests.
+* Continuously measures live latencies separately, automatically expanding the write pool to absorb distributed commit delays while keeping read pools lean and memory-efficient.
+
+### 7.2 Streaming Parallel Shard Deletion Engine
+* Queries all prefix partitions (`gcs_prewarm_test/0/` through `f/`) concurrently in parallel.
+* Streams object keys from pagination pages directly into bounded deletion tasks without buffering millions of keys in RAM, rendering a live progress counter throughout Phase 5 cleanup.
+
+### 7.3 Additional Performance Optimizations
+1. **C-Based `uvloop` Event Loop**: Automatically attaches `uvloop` (libuv C-engine) on Linux/macOS for 2x–3x higher event loop throughput.
+2. **Cached Authorization Headers**: Proactively caches OAuth2 header dictionaries in memory with non-blocking refresh, eliminating 15,000+ dictionary allocations per second.
+3. **Lock-Free Concurrency**: Leverages `aiohttp.TCPConnector` native connection limits, eliminating redundant Python semaphores and lock contention.
+4. **Direct Socket Tuning**: Enables `TCP_NODELAY` and HTTP Keep-Alive pooling for immediate packet dispatch without OS buffer delay.
 
