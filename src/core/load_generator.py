@@ -229,16 +229,29 @@ class GCSLoadEngine:
         self,
         target_read_qps: float,
         target_write_qps: float,
+        observed_read_latency_ms: Optional[float] = None,
+        observed_write_latency_ms: Optional[float] = None,
         observed_latency_ms: Optional[float] = None,
     ) -> None:
-        """Dynamically adapt worker pool concurrency to match real-time observed latency."""
+        """Dynamically adapt worker pool concurrency to match real-time observed Read & Write latencies independently."""
+        read_lat = (
+            observed_read_latency_ms
+            if (observed_read_latency_ms is not None and observed_read_latency_ms > 0)
+            else observed_latency_ms
+        )
+        write_lat = (
+            observed_write_latency_ms
+            if (observed_write_latency_ms is not None and observed_write_latency_ms > 0)
+            else observed_latency_ms
+        )
+
         if target_write_qps > 0:
             self._target_write_pool = self.compute_pipeline_pool_size(
-                int(target_write_qps), observed_latency_ms=observed_latency_ms
+                int(target_write_qps), observed_latency_ms=write_lat
             )
         if target_read_qps > 0:
             self._target_read_pool = self.compute_pipeline_pool_size(
-                int(target_read_qps), observed_latency_ms=observed_latency_ms
+                int(target_read_qps), observed_latency_ms=read_lat
             )
 
     async def run_write_pipeline(self, pool_size: Optional[int] = None) -> None:
@@ -249,12 +262,13 @@ class GCSLoadEngine:
 
         prefixes = self.plan.prefixes
         num_prefixes = len(prefixes)
+        min_safe = self.settings.get_safe_min_concurrency_per_worker()
 
         async def _write_worker_loop(worker_idx: int):
             idx = worker_idx
             while self._is_running:
                 # If target pool scaled down, exit gracefully
-                if len(self._write_workers) > self._target_write_pool and self._target_write_pool >= 50:
+                if len(self._write_workers) > self._target_write_pool and self._target_write_pool >= min_safe:
                     break
                 await self.write_limiter.acquire()
                 if not self._is_running:
@@ -293,10 +307,11 @@ class GCSLoadEngine:
                 self._seed_keys.append(self.partitioner.generate_seed_key(prefix, 0))
 
         num_keys = len(self._seed_keys)
+        min_safe = self.settings.get_safe_min_concurrency_per_worker()
 
         async def _read_worker_loop():
             while self._is_running:
-                if len(self._read_workers) > self._target_read_pool and self._target_read_pool >= 50:
+                if len(self._read_workers) > self._target_read_pool and self._target_read_pool >= min_safe:
                     break
                 await self.read_limiter.acquire()
                 if not self._is_running:
@@ -366,6 +381,56 @@ class GCSLoadEngine:
 
         return found_keys
 
+    async def cleanup_prefix_shard(
+        self,
+        prefix: str,
+        semaphore: asyncio.Semaphore,
+        progress_callback: Optional[callable] = None,
+    ) -> int:
+        """Stream list and delete all objects within a specific prefix shard concurrently."""
+        deleted_shard = 0
+        page_token = None
+        headers = await self.auth_provider.get_auth_headers(project_id=self.settings.gcp_project_id)
+
+        async def _bounded_delete(k: str) -> bool:
+            nonlocal deleted_shard
+            async with semaphore:
+                success = await self._execute_delete(k)
+                if success:
+                    deleted_shard += 1
+                if progress_callback:
+                    try:
+                        progress_callback(1)
+                    except Exception:
+                        pass
+                return success
+
+        try:
+            assert self._session is not None
+            while True:
+                url = f"https://storage.googleapis.com/storage/v1/b/{self.settings.gcs_bucket_name}/o?prefix={prefix}&fields=items(name),nextPageToken&maxResults=1000"
+                if page_token:
+                    url += f"&pageToken={page_token}"
+
+                async with self._session.get(url, headers=headers) as resp:
+                    if resp.status != 200:
+                        break
+                    data = await resp.json()
+                    items = data.get("items", [])
+                    keys = [item["name"] for item in items if "name" in item]
+
+                    if keys:
+                        tasks = [_bounded_delete(k) for k in keys]
+                        await asyncio.gather(*tasks, return_exceptions=True)
+
+                    page_token = data.get("nextPageToken")
+                    if not page_token:
+                        break
+        except Exception as e:
+            logger.debug(f"Shard cleanup for {prefix} failed: {e}")
+
+        return deleted_shard
+
     async def cleanup_all_objects(
         self,
         max_concurrency: Optional[int] = None,
@@ -375,11 +440,9 @@ class GCSLoadEngine:
         if max_concurrency is None or max_concurrency <= 0:
             max_concurrency = self.settings.get_effective_cleanup_concurrency()
 
-        all_keys: Set[str] = set(self._seed_keys)
-
         # In mock mode, instant cleanup
         if self.mock_mode:
-            deleted_count = len(all_keys) or 100
+            deleted_count = len(self._seed_keys) or 100
             self._seed_keys.clear()
             if progress_callback:
                 try:
@@ -388,44 +451,24 @@ class GCSLoadEngine:
                     pass
             return deleted_count
 
-        # Sweep all prefix shards concurrently in parallel
-        if self.settings.key_prefix_base:
-            list_tasks = [
-                self.list_objects_by_prefix(f"{self.settings.key_prefix_base}{p}")
-                for p in self.plan.prefixes
-            ]
-            results = await asyncio.gather(*list_tasks, return_exceptions=True)
-            for res in results:
-                if isinstance(res, list):
-                    all_keys.update(res)
-
-        if not all_keys:
-            return 0
-
-        keys_list = list(all_keys)
-        total_keys = len(keys_list)
-        deleted_count = 0
+        total_deleted = 0
         semaphore = asyncio.Semaphore(max_concurrency)
 
-        async def _bounded_delete(k: str) -> bool:
-            nonlocal deleted_count
-            async with semaphore:
-                success = await self._execute_delete(k)
-                if success:
-                    deleted_count += 1
-                if progress_callback:
-                    try:
-                        progress_callback(deleted_count, total_keys)
-                    except Exception:
-                        pass
-                return success
+        def _step_progress(inc: int):
+            nonlocal total_deleted
+            total_deleted += inc
+            if progress_callback:
+                try:
+                    progress_callback(total_deleted, None)
+                except Exception:
+                    pass
 
-        # Process in chunks of 1000 for efficient garbage collection
-        chunk_size = 1000
-        for i in range(0, total_keys, chunk_size):
-            chunk = keys_list[i : i + chunk_size]
-            tasks = [_bounded_delete(k) for k in chunk]
-            await asyncio.gather(*tasks, return_exceptions=True)
+        # Sweep all prefix shards concurrently in parallel
+        tasks = [
+            self.cleanup_prefix_shard(p, semaphore, _step_progress)
+            for p in self.plan.prefixes
+        ]
+        await asyncio.gather(*tasks, return_exceptions=True)
 
         self._seed_keys.clear()
-        return deleted_count
+        return total_deleted

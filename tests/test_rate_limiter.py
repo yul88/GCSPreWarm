@@ -121,3 +121,17 @@ async def test_token_bucket_limiter():
         await limiter.acquire()
 
     assert limiter.tokens < limiter.capacity
+
+
+@pytest.mark.asyncio
+async def test_token_bucket_high_concurrency_no_deadlock():
+    """Stress test 100 concurrent coroutines acquiring tokens to prove zero deadlock."""
+    limiter = TokenBucketRateLimiter(initial_rate=1000.0)
+
+    async def _acquire_task():
+        for _ in range(10):
+            await limiter.acquire()
+
+    # Run 100 coroutines concurrently with timeout
+    tasks = [_acquire_task() for _ in range(100)]
+    await asyncio.wait_for(asyncio.gather(*tasks), timeout=5.0)

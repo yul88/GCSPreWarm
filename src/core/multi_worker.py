@@ -79,11 +79,12 @@ def _worker_process_entry(
             except Exception:
                 pass
 
-            # Real-time latency feedback: auto-scale coroutines to match live measured latency
+            # Real-time latency feedback: independently auto-scale Read & Write coroutine pools
             engine.adjust_pipeline(
                 target_read_qps=r * settings.num_workers,
                 target_write_qps=w * settings.num_workers,
-                observed_latency_ms=snapshot.p95_latency_ms if snapshot.p95_latency_ms > 0 else None,
+                observed_read_latency_ms=snapshot.read_p95_latency_ms if snapshot.read_p95_latency_ms > 0 else None,
+                observed_write_latency_ms=snapshot.write_p95_latency_ms if snapshot.write_p95_latency_ms > 0 else None,
             )
 
             try:

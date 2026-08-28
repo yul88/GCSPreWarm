@@ -125,10 +125,17 @@ def test_dynamic_pipeline_pool_sizing():
     low_lat_pool = engine.compute_pipeline_pool_size(5000, observed_latency_ms=5.0)
     assert low_lat_pool == 50
 
-    # 6. adjust_pipeline updates internal target pools
-    engine.adjust_pipeline(target_read_qps=10000, target_write_qps=5000, observed_latency_ms=107.8)
-    assert engine._target_write_pool == 102
-    assert engine._target_read_pool == 203  # ceil(1250 * 0.1617) = 203
+    # 6. adjust_pipeline updates internal target pools with independent read and write latencies
+    # Read p95 = 20ms -> buffer = 30ms -> ceil(1250 * 0.030) = 38 -> clamp min 50
+    # Write p95 = 167.4ms -> buffer = 251.1ms -> ceil(625 * 0.2511) = 157
+    engine.adjust_pipeline(
+        target_read_qps=10000,
+        target_write_qps=5000,
+        observed_read_latency_ms=20.0,
+        observed_write_latency_ms=167.4,
+    )
+    assert engine._target_read_pool == 50
+    assert engine._target_write_pool == 157
 
     # 7. Manual override respected
     settings.worker_pool_size = 88

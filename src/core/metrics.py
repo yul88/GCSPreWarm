@@ -43,15 +43,25 @@ class MetricSnapshot:
     cum_5xx: int
     cum_errors: int
 
-    # Latency percentiles (milliseconds over recent window)
+    # Overall latency percentiles (milliseconds over recent window)
     p50_latency_ms: float
     p95_latency_ms: float
     p99_latency_ms: float
     max_latency_ms: float
 
+    # Read-specific latency percentiles
+    read_p50_latency_ms: float = 0.0
+    read_p95_latency_ms: float = 0.0
+    read_p99_latency_ms: float = 0.0
+
+    # Write-specific latency percentiles
+    write_p50_latency_ms: float = 0.0
+    write_p95_latency_ms: float = 0.0
+    write_p99_latency_ms: float = 0.0
+
     # Error & Throttling rate (Windowed ratio)
-    throttling_rate: float
-    error_rate: float
+    throttling_rate: float = 0.0
+    error_rate: float = 0.0
 
 
 class MetricsCollector:
@@ -139,13 +149,17 @@ class MetricsCollector:
         w_503 = 0
         w_5xx = 0
         w_err = 0
-        latencies: List[float] = []
+        all_latencies: List[float] = []
+        read_latencies: List[float] = []
+        write_latencies: List[float] = []
 
         for _, op, status, lat, is_err in samples:
             if op == "READ":
                 window_read += 1
+                read_latencies.append(lat)
             elif op == "WRITE":
                 window_write += 1
+                write_latencies.append(lat)
 
             if 200 <= status < 300:
                 w_2xx += 1
@@ -158,7 +172,7 @@ class MetricsCollector:
             if is_err:
                 w_err += 1
 
-            latencies.append(lat)
+            all_latencies.append(lat)
 
         effective_window = max(self.window_seconds, 0.001)
         cur_read_qps = window_read / effective_window
@@ -169,19 +183,22 @@ class MetricsCollector:
         throttling_rate = ((w_429 + w_503) / total_window_ops) if total_window_ops > 0 else 0.0
         error_rate = (w_err / total_window_ops) if total_window_ops > 0 else 0.0
 
-        # Percentile calculations
-        p50 = 0.0
-        p95 = 0.0
-        p99 = 0.0
-        max_lat = 0.0
+        # Helper for calculating percentiles
+        def _calc_p(lats: List[float]):
+            if not lats:
+                return 0.0, 0.0, 0.0, 0.0
+            lats.sort()
+            n = len(lats)
+            return (
+                lats[int(n * 0.50)],
+                lats[min(int(n * 0.95), n - 1)],
+                lats[min(int(n * 0.99), n - 1)],
+                lats[-1],
+            )
 
-        if latencies:
-            latencies.sort()
-            n = len(latencies)
-            p50 = latencies[int(n * 0.50)]
-            p95 = latencies[min(int(n * 0.95), n - 1)]
-            p99 = latencies[min(int(n * 0.99), n - 1)]
-            max_lat = latencies[-1]
+        p50, p95, p99, max_lat = _calc_p(all_latencies)
+        r_p50, r_p95, r_p99, _ = _calc_p(read_latencies)
+        w_p50, w_p95, w_p99, _ = _calc_p(write_latencies)
 
         return MetricSnapshot(
             timestamp=now,
@@ -206,6 +223,12 @@ class MetricsCollector:
             p95_latency_ms=p95,
             p99_latency_ms=p99,
             max_latency_ms=max_lat,
+            read_p50_latency_ms=r_p50,
+            read_p95_latency_ms=r_p95,
+            read_p99_latency_ms=r_p99,
+            write_p50_latency_ms=w_p50,
+            write_p95_latency_ms=w_p95,
+            write_p99_latency_ms=w_p99,
             throttling_rate=throttling_rate,
             error_rate=error_rate,
         )
@@ -237,6 +260,12 @@ def aggregate_snapshots(snapshots: List[MetricSnapshot], elapsed_seconds: float)
             p95_latency_ms=0.0,
             p99_latency_ms=0.0,
             max_latency_ms=0.0,
+            read_p50_latency_ms=0.0,
+            read_p95_latency_ms=0.0,
+            read_p99_latency_ms=0.0,
+            write_p50_latency_ms=0.0,
+            write_p95_latency_ms=0.0,
+            write_p99_latency_ms=0.0,
             throttling_rate=0.0,
             error_rate=0.0,
         )
@@ -270,6 +299,10 @@ def aggregate_snapshots(snapshots: List[MetricSnapshot], elapsed_seconds: float)
     ) if total_window_ops > 0 else 0.0
     error_rate = (window_errors / total_window_ops) if total_window_ops > 0 else 0.0
 
+    def _avg_list(vals: List[float]) -> float:
+        valid = [v for v in vals if v > 0]
+        return sum(valid) / len(valid) if valid else 0.0
+
     valid_latencies_p50 = [s.p50_latency_ms for s in snapshots if s.p50_latency_ms > 0]
     valid_latencies_p95 = [s.p95_latency_ms for s in snapshots if s.p95_latency_ms > 0]
     valid_latencies_p99 = [s.p99_latency_ms for s in snapshots if s.p99_latency_ms > 0]
@@ -279,6 +312,14 @@ def aggregate_snapshots(snapshots: List[MetricSnapshot], elapsed_seconds: float)
     p95 = sum(valid_latencies_p95) / len(valid_latencies_p95) if valid_latencies_p95 else 0.0
     p99 = sum(valid_latencies_p99) / len(valid_latencies_p99) if valid_latencies_p99 else 0.0
     max_lat = max(valid_latencies_max) if valid_latencies_max else 0.0
+
+    read_p50 = _avg_list([s.read_p50_latency_ms for s in snapshots])
+    read_p95 = _avg_list([s.read_p95_latency_ms for s in snapshots])
+    read_p99 = _avg_list([s.read_p99_latency_ms for s in snapshots])
+
+    write_p50 = _avg_list([s.write_p50_latency_ms for s in snapshots])
+    write_p95 = _avg_list([s.write_p95_latency_ms for s in snapshots])
+    write_p99 = _avg_list([s.write_p99_latency_ms for s in snapshots])
 
     return MetricSnapshot(
         timestamp=time.perf_counter(),
@@ -303,6 +344,12 @@ def aggregate_snapshots(snapshots: List[MetricSnapshot], elapsed_seconds: float)
         p95_latency_ms=p95,
         p99_latency_ms=p99,
         max_latency_ms=max_lat,
+        read_p50_latency_ms=read_p50,
+        read_p95_latency_ms=read_p95,
+        read_p99_latency_ms=read_p99,
+        write_p50_latency_ms=write_p50,
+        write_p95_latency_ms=write_p95,
+        write_p99_latency_ms=write_p99,
         throttling_rate=throttling_rate,
         error_rate=error_rate,
     )

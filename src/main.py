@@ -367,8 +367,15 @@ async def async_main(args: argparse.Namespace) -> int:
                     total=None,
                 )
 
-                def _on_clean_progress(completed: int, total: int):
-                    progress.update(clean_task_id, completed=completed, total=total)
+                def _on_clean_progress(completed: int, total: Optional[int] = None):
+                    if total is not None:
+                        progress.update(clean_task_id, completed=completed, total=total)
+                    else:
+                        progress.update(
+                            clean_task_id,
+                            completed=completed,
+                            description=f"🧹 Phase 5: Cleaning up test objects... ({completed:,} deleted)",
+                        )
 
                 cleaned_objects = await seed_engine.cleanup_all_objects(progress_callback=_on_clean_progress)
 
@@ -401,6 +408,12 @@ async def async_main(args: argparse.Namespace) -> int:
             p95_latency_ms=0.0,
             p99_latency_ms=0.0,
             max_latency_ms=0.0,
+            read_p50_latency_ms=0.0,
+            read_p95_latency_ms=0.0,
+            read_p99_latency_ms=0.0,
+            write_p50_latency_ms=0.0,
+            write_p95_latency_ms=0.0,
+            write_p99_latency_ms=0.0,
             throttling_rate=0.0,
             error_rate=0.0,
         )

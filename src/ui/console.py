@@ -176,7 +176,7 @@ class ConsoleDashboard:
 
         # Read row
         if ramp.target_read_qps > 0:
-            read_lat = f"{metrics.p50_latency_ms:.1f}ms / {metrics.p95_latency_ms:.1f}ms / {metrics.p99_latency_ms:.1f}ms"
+            read_lat = f"{metrics.read_p50_latency_ms:.1f}ms / {metrics.read_p95_latency_ms:.1f}ms / {metrics.read_p99_latency_ms:.1f}ms"
             outer_table.add_row(
                 "READ (GET)",
                 f"{int(ramp.current_read_target):,} / {ramp.target_read_qps:,}",
@@ -187,7 +187,7 @@ class ConsoleDashboard:
 
         # Write row
         if ramp.target_write_qps > 0:
-            write_lat = f"{metrics.p50_latency_ms:.1f}ms / {metrics.p95_latency_ms:.1f}ms / {metrics.p99_latency_ms:.1f}ms"
+            write_lat = f"{metrics.write_p50_latency_ms:.1f}ms / {metrics.write_p95_latency_ms:.1f}ms / {metrics.write_p99_latency_ms:.1f}ms"
             outer_table.add_row(
                 "WRITE (PUT)",
                 f"{int(ramp.current_write_target):,} / {ramp.target_write_qps:,}",
@@ -222,6 +222,10 @@ class ConsoleDashboard:
         table.add_row("Throttled Requests (429)", f"{metrics.cum_429:,}")
         table.add_row("Service Unavailable (503)", f"{metrics.cum_503:,}")
         table.add_row("Server Errors (5xx)", f"{metrics.cum_5xx:,}")
+        if metrics.total_read_ops > 0:
+            table.add_row("Read Latency p50 / p95 / p99", f"{metrics.read_p50_latency_ms:.1f}ms / {metrics.read_p95_latency_ms:.1f}ms / {metrics.read_p99_latency_ms:.1f}ms")
+        if metrics.total_write_ops > 0:
+            table.add_row("Write Latency p50 / p95 / p99", f"{metrics.write_p50_latency_ms:.1f}ms / {metrics.write_p95_latency_ms:.1f}ms / {metrics.write_p99_latency_ms:.1f}ms")
         table.add_row("Overall Latency p50 / p95 / p99", f"{metrics.p50_latency_ms:.1f}ms / {metrics.p95_latency_ms:.1f}ms / {metrics.p99_latency_ms:.1f}ms")
         table.add_row("Cleaned Up Test Objects", f"{cleaned_up_objects:,}")
 

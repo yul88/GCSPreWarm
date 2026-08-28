@@ -16,15 +16,22 @@ def test_metrics_collector_recording_and_snapshot():
     for _ in range(5):
         collector.record_request("WRITE", 429, 150.0)
 
+    # Record 50 successful reads with latencies 5ms to 54ms
+    for i in range(5, 55):
+        collector.record_request("READ", 200, float(i))
+
     snapshot = collector.get_snapshot()
 
     assert snapshot.total_write_ops == 105
-    assert snapshot.cum_2xx == 100
+    assert snapshot.total_read_ops == 50
+    assert snapshot.cum_2xx == 150
     assert snapshot.cum_429 == 5
-    assert snapshot.p50_latency_ms == pytest.approx(53.0, abs=5.0)
-    assert snapshot.p95_latency_ms == pytest.approx(100.0, abs=5.0)
-    assert snapshot.p99_latency_ms == 150.0
-    assert snapshot.throttling_rate == pytest.approx(5 / 105, abs=0.01)
+    assert snapshot.p50_latency_ms > 0
+    assert snapshot.write_p50_latency_ms == pytest.approx(53.0, abs=5.0)
+    assert snapshot.read_p50_latency_ms == pytest.approx(30.0, abs=5.0)
+    assert snapshot.write_p95_latency_ms == pytest.approx(100.0, abs=5.0)
+    assert snapshot.write_p99_latency_ms == 150.0
+    assert snapshot.throttling_rate == pytest.approx(5 / 155, abs=0.01)
 
 
 def test_check_platform_capacity():
@@ -51,4 +58,28 @@ def test_check_platform_capacity():
         num_workers=1,
     )
     assert dashboard.check_platform_capacity(settings_excess) is False
+
+
+def test_metrics_collector_multithreaded_concurrency():
+    """Verify thread safety under heavy multithreaded concurrent recording."""
+    import concurrent.futures
+
+    collector = MetricsCollector(window_seconds=5.0)
+
+    def _worker(thread_idx: int):
+        for i in range(100):
+            collector.record_request("WRITE", 200, float((i % 50) + 1))
+            collector.record_request("READ", 200, float((i % 30) + 1))
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(_worker, i) for i in range(10)]
+        concurrent.futures.wait(futures)
+
+    snapshot = collector.get_snapshot()
+    assert snapshot.total_write_ops == 1000
+    assert snapshot.total_read_ops == 1000
+    assert snapshot.total_ops == 2000
+    assert snapshot.cum_2xx == 2000
+    assert snapshot.read_p50_latency_ms > 0
+    assert snapshot.write_p50_latency_ms > 0
 

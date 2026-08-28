@@ -228,7 +228,7 @@ class TokenBucketRateLimiter:
 
     def __init__(self, initial_rate: float):
         self.rate = max(0.0, initial_rate)
-        self.capacity = max(10.0, self.rate)
+        self.capacity = max(10.0, self.rate * 0.25)
         self.tokens = self.capacity
         self.last_refill = time.perf_counter()
         self._lock = asyncio.Lock()
@@ -236,7 +236,7 @@ class TokenBucketRateLimiter:
     def set_rate(self, new_rate: float) -> None:
         """Dynamically update target rate and adjust capacity."""
         self.rate = max(0.0, new_rate)
-        self.capacity = max(10.0, self.rate)
+        self.capacity = max(10.0, self.rate * 0.25)
 
     async def acquire(self) -> None:
         """Asynchronously wait until a token is available."""

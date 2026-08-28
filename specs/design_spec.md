@@ -138,12 +138,15 @@ Prior to execution, the engine validates whether the current execution platform 
 ---
 
 ## 7. High-Throughput Engine Optimizations
-1. **Real-Time Latency-Adaptive Coroutine Pipeline**:
-   * Sized dynamically per worker process based on Little's Law with real-time latency feedback:
-     $$\text{Pool Size} = \text{clamp}\left(\left\lceil \frac{Q_{\text{target}}}{N_{\text{workers}}} \times \max\left(0.020, \min\left(1.0, \frac{\text{Latency}_{\text{p95}}}{1000} \times 1.5\right)\right) \right\rceil, \text{min}=50, \text{max}=500\right)$$
-   * Continuously measures live p95 request latency from telemetry and automatically expands/contracts coroutine worker pools on the fly to guarantee target QPS under changing network latencies, regional distances, or server load.
-2. **C-Based `uvloop` Event Loop**: Automatically attaches `uvloop` (libuv C-engine) on Linux/macOS for 2x–3x higher event loop throughput.
-3. **Cached Authorization Headers**: Proactively caches OAuth2 header dictionaries in memory with non-blocking refresh, eliminating 15,000+ dictionary allocations per second.
-4. **Lock-Free Concurrency**: Leverages `aiohttp.TCPConnector` native connection limits, eliminating redundant Python semaphores and lock contention.
-5. **Direct Socket Tuning**: Enables `TCP_NODELAY` and HTTP Keep-Alive pooling for immediate packet dispatch without OS buffer delay.
+1. **Independent Read & Write Latency-Adaptive Coroutine Pipelines**:
+   * Sized dynamically per worker process based on Little's Law with independent operation-specific latency feedback:
+     $$\text{Read Pool Size} = \text{clamp}\left(\left\lceil \frac{Q_{\text{read\_target}}}{N_{\text{workers}}} \times \max\left(0.020, \min\left(1.0, \frac{\text{Read\_Latency}_{\text{p95}}}{1000} \times 1.5\right)\right) \right\rceil, \text{min}=20/50, \text{max}=500\right)$$
+     $$\text{Write Pool Size} = \text{clamp}\left(\left\lceil \frac{Q_{\text{write\_target}}}{N_{\text{workers}}} \times \max\left(0.020, \min\left(1.0, \frac{\text{Write\_Latency}_{\text{p95}}}{1000} \times 1.5\right)\right) \right\rceil, \text{min}=20/50, \text{max}=500\right)$$
+   * Continuously measures live `read_p95_latency_ms` and `write_p95_latency_ms` separately, automatically expanding the write pool to absorb distributed commit delays while keeping read pools lean and memory-efficient.
+2. **Streaming Parallel Shard Deletion Engine**:
+   * Queries all prefix partitions (`gcs_prewarm_test/0/` through `f/`) concurrently in parallel. Streams object keys from pagination pages directly into bounded deletion tasks without buffering millions of keys in RAM, rendering a live progress counter throughout Phase 5 cleanup.
+3. **C-Based `uvloop` Event Loop**: Automatically attaches `uvloop` (libuv C-engine) on Linux/macOS for 2x–3x higher event loop throughput.
+4. **Cached Authorization Headers**: Proactively caches OAuth2 header dictionaries in memory with non-blocking refresh, eliminating 15,000+ dictionary allocations per second.
+5. **Lock-Free Concurrency**: Leverages `aiohttp.TCPConnector` native connection limits, eliminating redundant Python semaphores and lock contention.
+6. **Direct Socket Tuning**: Enables `TCP_NODELAY` and HTTP Keep-Alive pooling for immediate packet dispatch without OS buffer delay.
 

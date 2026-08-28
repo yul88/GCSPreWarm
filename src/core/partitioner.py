@@ -117,7 +117,7 @@ class KeyPartitioner:
             if match:
                 start_str, end_str = match.groups()
                 start_num = int(start_str)
-                end_num = int(end_num) if 'end_num' in locals() else int(end_str)
+                end_num = int(end_str)
                 width = len(start_str) if start_str.startswith("0") else 0
 
                 prefixes = []
