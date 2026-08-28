@@ -32,7 +32,7 @@
 | `GCS_BASE_URL` | `str` | `https://storage.googleapis.com` | Base GCS REST/XML API endpoint. |
 | `NUM_WORKERS` | `int` | `CPU Cores` | Auto-detected CPU cores (`os.cpu_count()`). 1 worker process per core. |
 | `WORKER_POOL_SIZE` | `int` | `Dynamic` | Auto-sized coroutines per process: $\text{clamp}(\lceil \frac{Q_{\text{target}}}{N_{\text{cpus}}} \times 0.05 \rceil, 20, 500)$. |
-| `HTTP_MAX_CONNECTIONS`| `int` | `Dynamic` | Auto-sized TCP pool per worker: $\max(200, \min(2000, \text{pool\_size} \times 2))$. |
+| `HTTP_MAX_CONNECTIONS`| `int` | `Dynamic` | Auto-sized TCP pool per worker: $\max(500, \min(2000, \text{PoolSize} \times 2))$. |
 | `SEED_OBJECTS_PER_PREFIX`| `int`| `20` | Optimal seed count per shard (20 objects per shard, auto-created in Phase 1). |
 | `CLEANUP_CONCURRENCY` | `int` | `Dynamic` | Auto-sized parallel deletion concurrency: $\max(100, \min(1000, N_{\text{cpus}} \times 50))$. |
 | `HTTP_TIMEOUT_SECONDS`| `float`| `10.0` | Individual request timeout in seconds. |
@@ -140,8 +140,8 @@ Prior to execution, the engine validates whether the current execution platform 
 ## 7. High-Throughput Engine Optimizations
 1. **Independent Read & Write Latency-Adaptive Coroutine Pipelines**:
    * Sized dynamically per worker process based on Little's Law with independent operation-specific latency feedback:
-     $$\text{Read Pool Size} = \text{clamp}\left(\left\lceil \frac{Q_{\text{read\_target}}}{N_{\text{workers}}} \times \max\left(0.020, \min\left(1.0, \frac{\text{Read\_Latency}_{\text{p95}}}{1000} \times 1.5\right)\right) \right\rceil, \text{min}=20/50, \text{max}=500\right)$$
-     $$\text{Write Pool Size} = \text{clamp}\left(\left\lceil \frac{Q_{\text{write\_target}}}{N_{\text{workers}}} \times \max\left(0.020, \min\left(1.0, \frac{\text{Write\_Latency}_{\text{p95}}}{1000} \times 1.5\right)\right) \right\rceil, \text{min}=20/50, \text{max}=500\right)$$
+     $$\text{Read Pool Size} = \text{clamp}\left(\left\lceil \frac{Q_{\text{read}}}{N_{\text{workers}}} \times \max\left(0.020, \min\left(1.0, \frac{\text{Read Latency}_{\text{p95}}}{1000} \times 1.5\right)\right) \right\rceil, \text{min}=20/50, \text{max}=500\right)$$
+     $$\text{Write Pool Size} = \text{clamp}\left(\left\lceil \frac{Q_{\text{write}}}{N_{\text{workers}}} \times \max\left(0.020, \min\left(1.0, \frac{\text{Write Latency}_{\text{p95}}}{1000} \times 1.5\right)\right) \right\rceil, \text{min}=20/50, \text{max}=500\right)$$
    * Continuously measures live `read_p95_latency_ms` and `write_p95_latency_ms` separately, automatically expanding the write pool to absorb distributed commit delays while keeping read pools lean and memory-efficient.
 2. **Streaming Parallel Shard Deletion Engine**:
    * Queries all prefix partitions (`gcs_prewarm_test/0/` through `f/`) concurrently in parallel. Streams object keys from pagination pages directly into bounded deletion tasks without buffering millions of keys in RAM, rendering a live progress counter throughout Phase 5 cleanup.

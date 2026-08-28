@@ -53,9 +53,9 @@ A lightweight, high-performance Python utility designed to help Google Cloud Pla
 All internal engine tuning parameters are automatically calculated from `TARGET_READ_QPS`, `TARGET_WRITE_QPS`, and the VM's CPU core count:
 * **CPU Worker Processes (`NUM_WORKERS`)**: 1 worker per CPU core (`os.cpu_count()`).
 * **Real-Time Latency-Adaptive Coroutine Pool (`WORKER_POOL_SIZE`)**: Auto-sized via Little's Law and continuously auto-tuned in real time from live p95 latency telemetry ($\text{Pool} \propto Q_{\text{target}} \times \text{Latency}_{\text{p95}}$), bounded by platform safety limits (`min 20/50`, `max 500`).
-* **TCP Connection Pool (`HTTP_MAX_CONNECTIONS`)**: Auto-sized per worker process ($\max(500, \min(\text{max\_safe} \times 2, 2000))$) to prevent OS socket exhaustion.
+* **TCP Connection Pool (`HTTP_MAX_CONNECTIONS`)**: Auto-sized per worker process ($\max(500, \min(\text{MaxSafe} \times 2, 2000))$) to prevent OS socket exhaustion.
 * **Seed Objects per Shard (`SEED_OBJECTS_PER_PREFIX`)**: Default 20 objects per shard (e.g., 320 objects across 16 shards, uploaded in < 1 second).
-* **Cleanup Parallelism (`CLEANUP_CONCURRENCY`)**: Auto-scaled to CPU cores and file descriptor limits ($\min(1000, \min(N_{\text{cpus}} \times 50, \text{FD\_limit}))$), sweeping all prefix partitions concurrently in parallel.
+* **Cleanup Parallelism (`CLEANUP_CONCURRENCY`)**: Auto-scaled to CPU cores and file descriptor limits ($\min(1000, \min(N_{\text{cpus}} \times 50, \text{FD Limit}))$, sweeping all prefix partitions concurrently in parallel.
 * **OS File Descriptor Tuning**: Auto-elevates `ulimit -n` to `65,535` via `resource.setrlimit`.
 
 ---
