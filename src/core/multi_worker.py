@@ -29,7 +29,6 @@ def _worker_process_entry(
     shared_write_rate: Value,
     stop_event: Event,
     metrics_queue: Queue,
-    keys_queue: Queue,
 ) -> None:
     """Entry point for a single parallel worker process."""
     from src.config.settings import optimize_system_resources
@@ -80,6 +79,13 @@ def _worker_process_entry(
             except Exception:
                 pass
 
+            # Real-time latency feedback: auto-scale coroutines to match live measured latency
+            engine.adjust_pipeline(
+                target_read_qps=r * settings.num_workers,
+                target_write_qps=w * settings.num_workers,
+                observed_latency_ms=snapshot.p95_latency_ms if snapshot.p95_latency_ms > 0 else None,
+            )
+
             try:
                 await asyncio.sleep(0.2)
             except asyncio.CancelledError:
@@ -92,19 +98,7 @@ def _worker_process_entry(
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Collect created keys for cleanup in chunks of 5,000 to prevent pipe buffer saturation
-        if engine._created_keys:
-            try:
-                keys_list = list(engine._created_keys)
-                chunk_size = 5000
-                for i in range(0, len(keys_list), chunk_size):
-                    keys_queue.put(keys_list[i : i + chunk_size], timeout=2.0)
-            except Exception:
-                pass
-
         try:
-            keys_queue.close()
-            keys_queue.cancel_join_thread()
             metrics_queue.close()
             metrics_queue.cancel_join_thread()
         except Exception:
@@ -140,13 +134,11 @@ class MultiProcessOrchestrator:
         # Standard Multiprocessing IPC primitives (pipe-backed, ultra-fast)
         self._stop_event = multiprocessing.Event()
         self._metrics_queue = multiprocessing.Queue()
-        self._keys_queue = multiprocessing.Queue()
         self._shared_read_rate = multiprocessing.Value("d", 0.0)
         self._shared_write_rate = multiprocessing.Value("d", 0.0)
 
         self._processes: List[Process] = []
         self._latest_worker_snapshots: Dict[int, MetricSnapshot] = {}
-        self._collected_keys: Set[str] = set()
 
     def start(self) -> None:
         """Spawn all worker processes."""
@@ -165,7 +157,6 @@ class MultiProcessOrchestrator:
                     self._shared_write_rate,
                     self._stop_event,
                     self._metrics_queue,
-                    self._keys_queue,
                 ),
                 daemon=True,
             )
@@ -199,15 +190,3 @@ class MultiProcessOrchestrator:
             p.join(timeout=1.0)
             if p.is_alive():
                 p.terminate()
-        # Drain all remaining keys from queue
-        self.get_created_keys()
-
-    def get_created_keys(self) -> List[str]:
-        """Retrieve list of all keys created across all worker processes."""
-        while True:
-            try:
-                batch = self._keys_queue.get_nowait()
-                self._collected_keys.update(batch)
-            except Exception:
-                break
-        return list(self._collected_keys)

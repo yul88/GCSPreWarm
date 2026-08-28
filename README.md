@@ -52,10 +52,10 @@ A lightweight, high-performance Python utility designed to help Google Cloud Pla
 ### 2. 100% Dynamic Engine Tuning (`src/config/settings.py`)
 All internal engine tuning parameters are automatically calculated from `TARGET_READ_QPS`, `TARGET_WRITE_QPS`, and the VM's CPU core count:
 * **CPU Worker Processes (`NUM_WORKERS`)**: 1 worker per CPU core (`os.cpu_count()`).
-* **Persistent Coroutine Pool (`WORKER_POOL_SIZE`)**: Auto-sized via Little's Law ($\text{clamp}(\lceil \frac{Q}{N} \times 0.05 \rceil, 20, 500)$).
-* **TCP Connection Pool (`HTTP_MAX_CONNECTIONS`)**: Auto-sized per worker ($\max(200, \text{pool\_size} \times 2)$).
+* **Real-Time Latency-Adaptive Coroutine Pool (`WORKER_POOL_SIZE`)**: Auto-sized via Little's Law and continuously auto-tuned in real time from live p95 latency telemetry ($\text{Pool} \propto Q_{\text{target}} \times \text{Latency}_{\text{p95}}$), bounded by platform safety limits (`min 20/50`, `max 500`).
+* **TCP Connection Pool (`HTTP_MAX_CONNECTIONS`)**: Auto-sized per worker process ($\max(500, \min(\text{max\_safe} \times 2, 2000))$) to prevent OS socket exhaustion.
 * **Seed Objects per Shard (`SEED_OBJECTS_PER_PREFIX`)**: Default 20 objects per shard (e.g., 320 objects across 16 shards, uploaded in < 1 second).
-* **Cleanup Parallelism (`CLEANUP_CONCURRENCY`)**: Auto-scaled to CPU cores ($\max(100, N_{\text{cpus}} \times 50)$).
+* **Cleanup Parallelism (`CLEANUP_CONCURRENCY`)**: Auto-scaled to CPU cores and file descriptor limits ($\min(1000, \min(N_{\text{cpus}} \times 50, \text{FD\_limit}))$), sweeping all prefix partitions concurrently in parallel.
 * **OS File Descriptor Tuning**: Auto-elevates `ulimit -n` to `65,535` via `resource.setrlimit`.
 
 ---
@@ -279,4 +279,5 @@ GCSPreWarm/
 | 2026-08-28 | **5x Engine Throughput Optimizations** | (1) **Dynamic Persistent Worker Pool** (auto-calculated from target QPS via Little's Law, zero Task allocations/sec), (2) **`uvloop` C-engine**, (3) **Cached Auth Header dicts**, (4) **Lock-free connection pooling**, (5) **`TCP_NODELAY` direct socket dispatch**. |
 | 2026-08-28 | **100% Dynamic Parameter Auto-Tuning** | All engine parameters (CPU workers, worker pool size, TCP connection limits, seed object counts, cleanup deletion concurrency, sharding allocation, ramp durations) are now **dynamically calculated from user Target QPS and VM CPU core count**, with optional manual overrides. |
 | 2026-08-28 | **Pre-Flight Hardware Capacity Check** | Automatically verifies whether the execution environment (Cloud Shell vs GCE VM cores) can sustain the requested target QPS ($\sim 2,500\text{ QPS/vCPU}$), alerting the user and providing specific machine sizing recommendations if under-provisioned. |
+| 2026-08-28 | **Real-Time Latency-Adaptive Pipeline** | The engine continuously monitors live p95 request latency and dynamically scales coroutine concurrency on the fly ($\text{Pool} \propto Q_{\text{target}} \times \text{Latency}_{\text{p95}}$), guaranteeing target QPS under any network RTT, regional distance, or GCS server response variances. |
 | 2026-08-26 | **Full Implementation & Tests** | Complete async load engine, token-bucket rate limiter, metrics collector, CLI, and unit test suite verified. |

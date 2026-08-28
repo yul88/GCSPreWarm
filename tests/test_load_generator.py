@@ -103,23 +103,34 @@ def test_dynamic_pipeline_pool_sizing():
         mock_mode=True,
     )
 
-    # 1. Target Read QPS: 10,000 across 8 workers -> (10000 / 8) * 0.05 = 62.5 -> 63 coroutines
+    # 1. Target Read QPS: 10,000 across 8 workers -> baseline 120ms buffer -> (10000 / 8) * 0.12 = 150 coroutines
     read_pool = engine.compute_pipeline_pool_size(10000)
-    assert read_pool == 63
+    assert read_pool == 150
 
-    # 2. Target Write QPS: 5,000 across 8 workers -> (5000 / 8) * 0.05 = 31.25 -> 32 coroutines
+    # 2. Target Write QPS: 5,000 across 8 workers -> baseline 120ms buffer -> (5000 / 8) * 0.12 = 75 coroutines
     write_pool = engine.compute_pipeline_pool_size(5000)
-    assert write_pool == 32
+    assert write_pool == 75
 
-    # 3. Small target QPS (<= 100) clamps to minimum 20
-    small_pool = engine.compute_pipeline_pool_size(100)
-    assert small_pool == 20
+    # 3. Real-time latency feedback: p95 latency = 107.8ms -> (107.8ms * 1.5 = 161.7ms buffer)
+    # per_worker = 625 -> ceil(625 * 0.1617) = 102 coroutines
+    adaptive_pool = engine.compute_pipeline_pool_size(5000, observed_latency_ms=107.8)
+    assert adaptive_pool == 102
 
-    # 4. Massive target QPS (200,000 on 2 workers) clamps to safe max 500
-    huge_pool = engine.compute_pipeline_pool_size(200000)
-    assert huge_pool == 500
+    # 4. High latency feedback: p95 latency = 250ms -> (250ms * 1.5 = 375ms buffer)
+    # per_worker = 625 -> ceil(625 * 0.375) = 235 coroutines
+    high_lat_pool = engine.compute_pipeline_pool_size(5000, observed_latency_ms=250.0)
+    assert high_lat_pool == 235
 
-    # 5. Manual override respected
+    # 5. Low latency feedback: p95 latency = 5ms -> clamps to min 50 coroutines
+    low_lat_pool = engine.compute_pipeline_pool_size(5000, observed_latency_ms=5.0)
+    assert low_lat_pool == 50
+
+    # 6. adjust_pipeline updates internal target pools
+    engine.adjust_pipeline(target_read_qps=10000, target_write_qps=5000, observed_latency_ms=107.8)
+    assert engine._target_write_pool == 102
+    assert engine._target_read_pool == 203  # ceil(1250 * 0.1617) = 203
+
+    # 7. Manual override respected
     settings.worker_pool_size = 88
     assert engine.compute_pipeline_pool_size(10000) == 88
 

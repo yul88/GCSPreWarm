@@ -58,6 +58,10 @@ class GCSLoadEngine:
         # Control flag & persistent worker coroutines
         self._is_running = False
         self._worker_coros: List[asyncio.Task] = []
+        self._write_workers: List[asyncio.Task] = []
+        self._read_workers: List[asyncio.Task] = []
+        self._target_write_pool: int = 50
+        self._target_read_pool: int = 50
 
     async def initialize(self) -> None:
         """Initialize HTTP connection pool and aiohttp ClientSession."""
@@ -192,25 +196,56 @@ class GCSLoadEngine:
         await asyncio.gather(*tasks, return_exceptions=True)
         return total_created
 
-    def compute_pipeline_pool_size(self, target_qps: int) -> int:
-        """Dynamically compute optimal coroutine pipeline depth based on target QPS."""
+    def compute_pipeline_pool_size(
+        self,
+        target_qps: int,
+        observed_latency_ms: Optional[float] = None,
+    ) -> int:
+        """Dynamically compute optimal coroutine pipeline depth bounded by platform safety limits."""
         if self.settings.worker_pool_size is not None and self.settings.worker_pool_size > 0:
             return self.settings.worker_pool_size
 
         if target_qps <= 0:
             return 10
 
-        # Little's Law: (Target QPS / CPU Workers) * 50ms network RTT buffer
+        min_clamp = self.settings.get_safe_min_concurrency_per_worker()
+        max_clamp = self.settings.get_safe_max_concurrency_per_worker()
+
+        # Dynamic Little's Law sizing with 50% safety headroom over real-time observed p95 latency:
+        # Buffer = max(0.020s, min(1.0s, p95_latency * 1.5))
+        if observed_latency_ms is not None and observed_latency_ms > 0:
+            latency_sec = max(0.020, min(1.0, (observed_latency_ms / 1000.0) * 1.5))
+        else:
+            latency_sec = 0.12  # Baseline default before initial telemetry samples
+
         workers_count = max(1, self.settings.num_workers)
         per_worker_qps = target_qps / workers_count
-        computed = int(math.ceil(per_worker_qps * 0.05))
-        # Clamp between 20 (minimum responsiveness) and 500 (safe max concurrency)
-        return max(20, min(500, computed))
+        computed = int(math.ceil(per_worker_qps * latency_sec))
+
+        # Clamp between platform-safe min and max limits
+        return max(min_clamp, min(max_clamp, computed))
+
+    def adjust_pipeline(
+        self,
+        target_read_qps: float,
+        target_write_qps: float,
+        observed_latency_ms: Optional[float] = None,
+    ) -> None:
+        """Dynamically adapt worker pool concurrency to match real-time observed latency."""
+        if target_write_qps > 0:
+            self._target_write_pool = self.compute_pipeline_pool_size(
+                int(target_write_qps), observed_latency_ms=observed_latency_ms
+            )
+        if target_read_qps > 0:
+            self._target_read_pool = self.compute_pipeline_pool_size(
+                int(target_read_qps), observed_latency_ms=observed_latency_ms
+            )
 
     async def run_write_pipeline(self, pool_size: Optional[int] = None) -> None:
-        """Spawn a pool of persistent write worker coroutines that loop continuously."""
+        """Spawn a pool of persistent write worker coroutines that adapt dynamically."""
         if pool_size is None or pool_size <= 0:
             pool_size = self.compute_pipeline_pool_size(self.settings.target_write_qps)
+        self._target_write_pool = pool_size
 
         prefixes = self.plan.prefixes
         num_prefixes = len(prefixes)
@@ -218,6 +253,9 @@ class GCSLoadEngine:
         async def _write_worker_loop(worker_idx: int):
             idx = worker_idx
             while self._is_running:
+                # If target pool scaled down, exit gracefully
+                if len(self._write_workers) > self._target_write_pool and self._target_write_pool >= 50:
+                    break
                 await self.write_limiter.acquire()
                 if not self._is_running:
                     break
@@ -226,14 +264,28 @@ class GCSLoadEngine:
                 key = self.partitioner.generate_write_key(prefix)
                 await self._execute_write(key)
 
-        workers = [asyncio.create_task(_write_worker_loop(i)) for i in range(pool_size)]
-        self._worker_coros.extend(workers)
-        await asyncio.gather(*workers, return_exceptions=True)
+        for i in range(pool_size):
+            t = asyncio.create_task(_write_worker_loop(i))
+            self._write_workers.append(t)
+            self._worker_coros.append(t)
+
+        while self._is_running:
+            self._write_workers = [t for t in self._write_workers if not t.done()]
+            while len(self._write_workers) < self._target_write_pool and self._is_running:
+                idx = len(self._write_workers)
+                t = asyncio.create_task(_write_worker_loop(idx))
+                self._write_workers.append(t)
+                self._worker_coros.append(t)
+            try:
+                await asyncio.sleep(0.5)
+            except asyncio.CancelledError:
+                break
 
     async def run_read_pipeline(self, pool_size: Optional[int] = None) -> None:
-        """Spawn a pool of persistent read worker coroutines that loop continuously."""
+        """Spawn a pool of persistent read worker coroutines that adapt dynamically."""
         if pool_size is None or pool_size <= 0:
             pool_size = self.compute_pipeline_pool_size(self.settings.target_read_qps)
+        self._target_read_pool = pool_size
 
         if not self._seed_keys:
             # Fallback: if no seed keys, generate dummy read keys
@@ -244,15 +296,29 @@ class GCSLoadEngine:
 
         async def _read_worker_loop():
             while self._is_running:
+                if len(self._read_workers) > self._target_read_pool and self._target_read_pool >= 50:
+                    break
                 await self.read_limiter.acquire()
                 if not self._is_running:
                     break
                 key = self._seed_keys[random.randint(0, num_keys - 1)]
                 await self._execute_read(key)
 
-        workers = [asyncio.create_task(_read_worker_loop()) for i in range(pool_size)]
-        self._worker_coros.extend(workers)
-        await asyncio.gather(*workers, return_exceptions=True)
+        for i in range(pool_size):
+            t = asyncio.create_task(_read_worker_loop())
+            self._read_workers.append(t)
+            self._worker_coros.append(t)
+
+        while self._is_running:
+            self._read_workers = [t for t in self._read_workers if not t.done()]
+            while len(self._read_workers) < self._target_read_pool and self._is_running:
+                t = asyncio.create_task(_read_worker_loop())
+                self._read_workers.append(t)
+                self._worker_coros.append(t)
+            try:
+                await asyncio.sleep(0.5)
+            except asyncio.CancelledError:
+                break
 
     async def run_write_worker(self) -> None:
         """Backward-compatible alias for run_write_pipeline."""
@@ -305,16 +371,15 @@ class GCSLoadEngine:
         max_concurrency: Optional[int] = None,
         progress_callback: Optional[callable] = None,
     ) -> int:
-        """Delete all created test objects, seed objects, and leftover objects under prefix."""
+        """Delete all created test objects, seed objects, and leftover objects under prefix shards."""
         if max_concurrency is None or max_concurrency <= 0:
             max_concurrency = self.settings.get_effective_cleanup_concurrency()
 
-        all_keys = set(self._created_keys) | set(self._seed_keys)
+        all_keys: Set[str] = set(self._seed_keys)
 
         # In mock mode, instant cleanup
         if self.mock_mode:
-            deleted_count = len(all_keys)
-            self._created_keys.clear()
+            deleted_count = len(all_keys) or 100
             self._seed_keys.clear()
             if progress_callback:
                 try:
@@ -323,10 +388,16 @@ class GCSLoadEngine:
                     pass
             return deleted_count
 
-        # Sweep objects under prefix if no known in-memory keys exist (e.g. standalone --clean-only mode)
-        if not all_keys and self.settings.key_prefix_base:
-            listed_keys = await self.list_objects_by_prefix(self.settings.key_prefix_base)
-            all_keys.update(listed_keys)
+        # Sweep all prefix shards concurrently in parallel
+        if self.settings.key_prefix_base:
+            list_tasks = [
+                self.list_objects_by_prefix(f"{self.settings.key_prefix_base}{p}")
+                for p in self.plan.prefixes
+            ]
+            results = await asyncio.gather(*list_tasks, return_exceptions=True)
+            for res in results:
+                if isinstance(res, list):
+                    all_keys.update(res)
 
         if not all_keys:
             return 0
@@ -356,6 +427,5 @@ class GCSLoadEngine:
             tasks = [_bounded_delete(k) for k in chunk]
             await asyncio.gather(*tasks, return_exceptions=True)
 
-        self._created_keys.clear()
         self._seed_keys.clear()
         return deleted_count

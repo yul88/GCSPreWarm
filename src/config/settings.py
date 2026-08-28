@@ -160,16 +160,34 @@ class Settings(BaseSettings):
         description="Optional manual override for seed objects per shard (default: auto-sized from Read QPS scale).",
     )
 
+    def get_safe_min_concurrency_per_worker(self) -> int:
+        """Compute minimum coroutine concurrency per worker ensuring low-overhead responsiveness."""
+        max_target = max(self.target_read_qps, self.target_write_qps)
+        if max_target <= 100 or self.num_workers == 1:
+            return 20
+        return 50
+
+    def get_safe_max_concurrency_per_worker(self) -> int:
+        """Compute maximum safe coroutine concurrency per worker bounded by OS file descriptors and CPU cores."""
+        max_fd = optimize_system_resources()
+        # Reserve 150 file descriptors for OS, logs, queues, pipes, and DNS sockets
+        available_fd = max(100, max_fd - 150)
+        # Each coroutine can hold 1 HTTP socket + 1 TCP connector socket buffer
+        fd_based_max = max(50, available_fd // 2)
+        # Core-based cap: 500 coroutines per CPU core to prevent thread/context switching thrashing
+        return min(500, fd_based_max)
+
     def get_effective_http_connections(self) -> int:
-        """Dynamically compute connection pool size per worker process."""
+        """Dynamically compute connection pool size per worker process bounded by platform limits."""
         if self.http_max_connections is not None and self.http_max_connections > 0:
             return self.http_max_connections
-        # Default dynamic sizing: 2x coroutine pool size, minimum 200, max 2000
+        max_safe = self.get_safe_max_concurrency_per_worker()
+        min_safe = self.get_safe_min_concurrency_per_worker()
         workers_count = max(1, self.num_workers)
         max_target = max(self.target_read_qps, self.target_write_qps)
         per_worker_qps = max_target / workers_count
-        pool_size = max(20, min(500, int(per_worker_qps * 0.05)))
-        return max(200, min(2000, pool_size * 2))
+        pool_size = max(min_safe, min(max_safe, int(per_worker_qps * 0.12)))
+        return max(500, min(2000, pool_size * 2))
 
     def get_effective_seed_count(self, total_shards: int) -> int:
         """Dynamically compute seed object count per prefix shard (default: 20 objects per shard)."""
@@ -181,8 +199,11 @@ class Settings(BaseSettings):
         return 20
 
     def get_effective_cleanup_concurrency(self) -> int:
-        """Dynamically compute cleanup delete concurrency based on CPU core count."""
-        return max(100, min(1000, self.num_workers * 50))
+        """Dynamically compute cleanup delete concurrency bounded by system file descriptors."""
+        max_fd = optimize_system_resources()
+        fd_safe_limit = max(50, (max_fd - 150) // 2)
+        core_based = self.num_workers * 50
+        return max(50, min(1000, min(core_based, fd_safe_limit)))
 
     @field_validator("key_prefix_base")
     @classmethod

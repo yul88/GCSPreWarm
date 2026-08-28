@@ -354,12 +354,7 @@ async def async_main(args: argparse.Namespace) -> int:
         # =====================================================================
         orchestrator.stop()
 
-        # Collect created keys from workers and seed engine
-        all_created_keys = set(orchestrator.get_created_keys()) | seed_engine._created_keys | set(seed_engine._seed_keys)
-        seed_engine._created_keys = all_created_keys
-
-        if settings.cleanup_on_finish and all_created_keys:
-            total_clean_keys = len(all_created_keys)
+        if settings.cleanup_on_finish:
             with Progress(
                 TextColumn("[cyan]{task.description}"),
                 BarColumn(),
@@ -368,16 +363,16 @@ async def async_main(args: argparse.Namespace) -> int:
                 console=console,
             ) as progress:
                 clean_task_id = progress.add_task(
-                    f"🧹 Cleaning up {total_clean_keys:,} test objects...",
-                    total=total_clean_keys,
+                    "🧹 Phase 5: Cleaning up test objects across prefix shards...",
+                    total=None,
                 )
 
                 def _on_clean_progress(completed: int, total: int):
-                    progress.update(clean_task_id, completed=completed)
+                    progress.update(clean_task_id, completed=completed, total=total)
 
                 cleaned_objects = await seed_engine.cleanup_all_objects(progress_callback=_on_clean_progress)
 
-            console.print(f"[green]✓ Cleaned up {cleaned_objects:,} objects.[/green]")
+            console.print(f"[green]✓ Cleaned up {cleaned_objects:,} objects across prefix shards.[/green]")
 
         await seed_engine.close()
 

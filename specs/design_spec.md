@@ -138,10 +138,10 @@ Prior to execution, the engine validates whether the current execution platform 
 ---
 
 ## 7. High-Throughput Engine Optimizations
-1. **Dynamic Persistent Worker Coroutine Pool**:
-   * Sized dynamically per worker process based on Little's Law:
-     $$\text{Pool Size} = \text{clamp}\left(\left\lceil \frac{Q_{\text{target}}}{N_{\text{workers}}} \times 0.05 \right\rceil, \text{min}=20, \text{max}=500\right)$$
-   * Automatically allocates fewer coroutines (20) for small workloads to conserve memory and scales up to hundreds for high-QPS runs, eliminating per-request Task/Future allocations.
+1. **Real-Time Latency-Adaptive Coroutine Pipeline**:
+   * Sized dynamically per worker process based on Little's Law with real-time latency feedback:
+     $$\text{Pool Size} = \text{clamp}\left(\left\lceil \frac{Q_{\text{target}}}{N_{\text{workers}}} \times \max\left(0.020, \min\left(1.0, \frac{\text{Latency}_{\text{p95}}}{1000} \times 1.5\right)\right) \right\rceil, \text{min}=50, \text{max}=500\right)$$
+   * Continuously measures live p95 request latency from telemetry and automatically expands/contracts coroutine worker pools on the fly to guarantee target QPS under changing network latencies, regional distances, or server load.
 2. **C-Based `uvloop` Event Loop**: Automatically attaches `uvloop` (libuv C-engine) on Linux/macOS for 2x–3x higher event loop throughput.
 3. **Cached Authorization Headers**: Proactively caches OAuth2 header dictionaries in memory with non-blocking refresh, eliminating 15,000+ dictionary allocations per second.
 4. **Lock-Free Concurrency**: Leverages `aiohttp.TCPConnector` native connection limits, eliminating redundant Python semaphores and lock contention.

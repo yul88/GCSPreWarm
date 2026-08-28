@@ -78,8 +78,8 @@ def test_dynamic_settings_resolution():
         num_workers=8,
     )
     # 1. HTTP connections dynamic resolution
-    # per_worker_qps = 10000 / 8 = 1250 -> pool_size = 62 -> connections = max(200, 62*2) = 200
-    assert settings.get_effective_http_connections() == 200
+    # per_worker_qps = 10000 / 8 = 1250 -> pool_size = 150 -> connections = max(500, 150*2) = 500
+    assert settings.get_effective_http_connections() == 500
 
     # 2. Seed count dynamic resolution
     # 20 seed objects per shard
@@ -89,7 +89,20 @@ def test_dynamic_settings_resolution():
     # 8 workers * 50 = 400
     assert settings.get_effective_cleanup_concurrency() == 400
 
-    # 4. Manual overrides respected
+    # 4. Platform safe concurrency limits
+    assert settings.get_safe_min_concurrency_per_worker() == 50
+    assert 50 <= settings.get_safe_max_concurrency_per_worker() <= 500
+
+    # Small workload min concurrency
+    small_settings = Settings(
+        gcs_bucket_name="test-bucket",
+        target_read_qps=50,
+        target_write_qps=50,
+        num_workers=1,
+    )
+    assert small_settings.get_safe_min_concurrency_per_worker() == 20
+
+    # 5. Manual overrides respected
     settings.http_max_connections = 1500
     assert settings.get_effective_http_connections() == 1500
     settings.seed_objects_per_prefix = 50
