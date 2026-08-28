@@ -274,8 +274,9 @@ class GCSLoadEngine:
                 if not self._is_running:
                     break
                 prefix = prefixes[idx % num_prefixes]
+                slot = idx % self.settings.write_key_pool_size if self.settings.write_key_pool_size > 0 else None
                 idx += 1
-                key = self.partitioner.generate_write_key(prefix)
+                key = self.partitioner.generate_write_key(prefix, slot_index=slot)
                 await self._execute_write(key)
 
         for i in range(pool_size):

@@ -46,6 +46,7 @@ A lightweight, high-performance Python utility designed to help Google Cloud Pla
 * `CUSTOM_PREFIXES`: Comma-separated list of customer prefixes (e.g., `users/,orders/,media/,events/`).
 * `PREFIX_TEMPLATE`: Sequence template for customer prefixes (e.g., `tenant_{001..050}/`).
 * `KEY_PREFIX_BASE`: Base folder path inside the bucket (e.g., `gcs_prewarm_test/` or empty `""` for bucket root).
+* `WRITE_KEY_POOL_SIZE`: Rotating write key pool size per shard (default: `256` keys/shard, e.g. `00`–`ff` in HEX mode). Overwriting a bounded pool generates 100% full GCS write throughput and triggers partition splitting while capping total objects to ~4,096, allowing instantaneous (<1-2s) cleanup. Set to `0` for infinite unique keys.
 * `CLEANUP_ON_FINISH`: Automatically delete created test objects after run (`true`/`false`).
 * `KEEP_WARM_MODE`: Keep sending heartbeat traffic after test finishes to sustain splits (`true`/`false`).
 
@@ -216,6 +217,7 @@ You can override any `.env` parameter directly from the command line:
 | `--ramp-duration <sec>` | Override ramp-up duration in seconds (sets profile to `CUSTOM`). | `python3 src/main.py --ramp-duration 300` |
 | `--sustain-duration <sec>`| Override sustain duration in seconds. | `python3 src/main.py --sustain-duration 120` |
 | `--workers <N>` | Override worker concurrency (defaults to auto-detected CPU cores). | `python3 src/main.py --workers 8` |
+| `--write-key-pool <N>`| Rotating write key pool size per shard (default 256 keys/shard, e.g. 00-ff). Set to 0 for infinite unique keys. | `python3 src/main.py --write-key-pool 256` |
 | `--clean-only` | Perform standalone cleanup of all test objects under `KEY_PREFIX_BASE` without running load. | `python3 src/main.py --clean-only` |
 | `--no-cleanup` | Keep created test objects after test completion. | `python3 src/main.py --no-cleanup` |
 | `--keep-warm` | Maintain low-rate heartbeat traffic after sustain finishes until stopped. | `python3 src/main.py --keep-warm` |
@@ -280,5 +282,6 @@ GCSPreWarm/
 | 2026-08-28 | **100% Dynamic Parameter Auto-Tuning** | All engine parameters (CPU workers, worker pool size, TCP connection limits, seed object counts, cleanup deletion concurrency, sharding allocation, ramp durations) are now **dynamically calculated from user Target QPS and VM CPU core count**, with optional manual overrides. |
 | 2026-08-28 | **Pre-Flight Hardware Capacity Check** | Automatically verifies whether the execution environment (Cloud Shell vs GCE VM cores) can sustain the requested target QPS ($\sim 2,500\text{ QPS/vCPU}$), alerting the user and providing specific machine sizing recommendations if under-provisioned. |
 | 2026-08-28 | **Independent Read/Write Latency Auto-Tuning** | The engine independently monitors `read_p95_latency_ms` and `write_p95_latency_ms`, auto-scaling Read and Write coroutine worker pools separately to absorb write commit latency while keeping read pools lean. |
-| 2026-08-28 | **Streaming Parallel Shard Deletion Engine** | Sweeps all partition prefixes concurrently in parallel with streaming page processing, deleting objects immediately as pages arrive with live progress tracking and zero RAM accumulation. |
+| 2026-08-28 | **Rotating Write Key Pool (`WRITE_KEY_POOL_SIZE=256`)** | Switched write key generation to a 256-key rotating pool per shard (`00`–`ff` in HEX mode, total ~4,096 objects). Overwriting rotating keys generates 100% full GCS write throughput and index splitting while cutting post-run cleanup time from 1 hour down to < 1-2 seconds. |
+| 2026-08-28 | **Pre-Flight Write Key Pool & Rate Check** | Added automated pre-flight check validating `WRITE_KEY_POOL_SIZE` against GCS's 1 write/sec per object limit, alerting users if pool size is undersized for configured QPS or in infinite object mode. |
 | 2026-08-26 | **Full Implementation & Tests** | Complete async load engine, token-bucket rate limiter, metrics collector, CLI, and unit test suite verified. |

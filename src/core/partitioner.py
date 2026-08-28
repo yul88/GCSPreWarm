@@ -159,8 +159,19 @@ class KeyPartitioner:
             prefixes=full_prefixes,
         )
 
-    def generate_write_key(self, prefix_shard: str) -> str:
-        """Generate a distinct, unique object key within a given prefix shard."""
+    def generate_write_key(self, prefix_shard: str, slot_index: Optional[int] = None) -> str:
+        """Generate an object key within a given prefix shard, supporting rotating key pool."""
+        if self.settings.write_key_pool_size > 0:
+            if slot_index is None:
+                slot_index = random.randint(0, self.settings.write_key_pool_size - 1)
+            else:
+                slot_index = slot_index % self.settings.write_key_pool_size
+
+            if self.settings.key_strategy == "HEX":
+                return f"{prefix_shard}slot_{slot_index:02x}.dat"
+            return f"{prefix_shard}test_obj_{slot_index:04d}.dat"
+
+        # Infinite unique keys mode
         unique_id = uuid.uuid4().hex[:12]
         timestamp_ns = time.time_ns()
         return f"{prefix_shard}obj_{timestamp_ns}_{unique_id}.dat"

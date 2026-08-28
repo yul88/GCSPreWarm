@@ -110,6 +110,11 @@ def parse_args() -> argparse.Namespace:
         help="Skip cleaning up generated test objects upon completion.",
     )
     parser.add_argument(
+        "--write-key-pool",
+        type=int,
+        help="Rotating write key pool size per shard (default 256 keys/shard). Overwriting a bounded pool triggers 100%% full GCS write load while enabling instant (<1-2s) cleanup. Set to 0 for infinite unique keys.",
+    )
+    parser.add_argument(
         "--keep-warm",
         action="store_true",
         help="Enable keep-warm heartbeat loop after sustain completes.",
@@ -146,6 +151,8 @@ async def async_main(args: argparse.Namespace) -> int:
         settings.sustain_duration_seconds = args.sustain_duration
     if args.workers is not None:
         settings.num_workers = args.workers
+    if args.write_key_pool is not None:
+        settings.write_key_pool_size = args.write_key_pool
     if args.cleanup is not None:
         settings.cleanup_on_finish = args.cleanup
     if args.keep_warm:
@@ -187,6 +194,9 @@ async def async_main(args: argparse.Namespace) -> int:
 
     # Perform VM platform hardware capacity pre-check
     dashboard.check_platform_capacity(settings)
+
+    # Perform Write Key Pool sizing & mutation rate pre-check
+    dashboard.check_write_key_pool_capacity(settings, len(partitioner.plan.prefixes))
 
     if args.dry_run:
         console.print("[bold yellow]ℹ️ Dry-run mode completed. No traffic sent to GCS.[/bold yellow]")

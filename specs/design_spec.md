@@ -23,6 +23,7 @@
 | `CUSTOM_PREFIXES` | `str` | `""` | Comma-separated list of customer prefixes (e.g., `users/,orders/`). |
 | `PREFIX_TEMPLATE` | `str` | `""` | Sequence template for prefixes (e.g., `tenant_{001..050}/`). |
 | `KEY_PREFIX_BASE` | `str` | `"gcs_prewarm_test/"` | Base path/directory inside the bucket (e.g., `app_v1/` or `""` for root). |
+| `WRITE_KEY_POOL_SIZE` | `int` | `256` | Rotating write key pool size per shard (e.g. 00-ff in HEX; caps objects to ~4k, enabling <1-2s cleanup). |
 | `CLEANUP_ON_FINISH` | `bool` | `true` | Asynchronously delete created test objects after completion. |
 | `KEEP_WARM_MODE` | `bool` | `false` | Continue low-rate heartbeat traffic to maintain split shards. |
 
@@ -134,6 +135,12 @@ Prior to execution, the engine validates whether the current execution platform 
 * **Cloud Shell**: Capped at ~1,500 QPS (prompts user to deploy a dedicated GCE VM for $\ge 5,000$ QPS).
 * **GCE / Linux VM**: Estimated at $\sim 2,500\text{ HTTPS QPS / vCPU}$.
 * **Action on Over-subscription**: Warns the user with a prominent hardware sizing alert and provides specific machine type recommendations (e.g. `n4-highcpu-4`, `n4-highcpu-8`, `c3-highcpu-16`, or multi-client distribution).
+
+### 6.2 Object Mutation Rate & Key Pool Pre-Flight Validation
+Prior to sending write load, the engine validates `WRITE_KEY_POOL_SIZE` against GCS's 1 write/sec per object limit:
+$$\text{Estimated Write Rate per Object} = \frac{Q_{\text{write}}}{N_{\text{shards}} \times \text{WRITE\_KEY\_POOL\_SIZE}}$$
+* If estimated write rate $> 2.0\text{ writes/sec/object}$, warns the user that the pool size is undersized and recommends an optimal pool size (e.g., $\ge 256$) to prevent HTTP 429 object immutability rate limiting.
+* If `WRITE_KEY_POOL_SIZE = 0` (infinite unique keys mode), alerts the user about the expected million-object accumulation and prolonged post-test cleanup times.
 
 ---
 

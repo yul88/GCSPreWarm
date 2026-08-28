@@ -83,3 +83,38 @@ def test_metrics_collector_multithreaded_concurrency():
     assert snapshot.read_p50_latency_ms > 0
     assert snapshot.write_p50_latency_ms > 0
 
+
+def test_check_write_key_pool_capacity():
+    """Verify write key pool size validation against GCS 1 write/s per object quota."""
+    from src.config.settings import Settings
+    from src.ui.console import ConsoleDashboard
+
+    dashboard = ConsoleDashboard()
+
+    # 1. Safe configuration: 5,000 Write QPS across 16 shards with 256 slots (~1.2 writes/s)
+    settings_safe = Settings(
+        gcs_bucket_name="test-bucket",
+        target_write_qps=5000,
+        target_read_qps=0,
+        write_key_pool_size=256,
+    )
+    assert dashboard.check_write_key_pool_capacity(settings_safe, total_shards=16) is True
+
+    # 2. Dangerous configuration: 10,000 Write QPS across 16 shards with only 10 slots (62.5 writes/s per object!)
+    settings_risky = Settings(
+        gcs_bucket_name="test-bucket",
+        target_write_qps=10000,
+        target_read_qps=0,
+        write_key_pool_size=10,
+    )
+    assert dashboard.check_write_key_pool_capacity(settings_risky, total_shards=16) is False
+
+    # 3. Read only (0 write QPS) -> Always True
+    settings_read_only = Settings(
+        gcs_bucket_name="test-bucket",
+        target_write_qps=0,
+        target_read_qps=5000,
+        write_key_pool_size=10,
+    )
+    assert dashboard.check_write_key_pool_capacity(settings_read_only, total_shards=16) is True
+

@@ -91,6 +91,13 @@ class Settings(BaseSettings):
         default=True,
         description="Automatically delete created test objects upon completion.",
     )
+    write_key_pool_size: int = Field(
+        default=256,
+        ge=0,
+        description="Rotating write key pool size per shard (0 for infinite unique keys, default: 256 keys/shard, e.g. 00-ff in HEX mode). "
+                    "Overwriting a rotating key pool triggers 100% full GCS write throughput and partition splitting "
+                    "while capping total created objects to ~4,096, allowing instantaneous (<1-2s) cleanup.",
+    )
     keep_warm_mode: bool = Field(
         default=False,
         description="Maintain low-rate heartbeat traffic after test completes to keep shards warm.",

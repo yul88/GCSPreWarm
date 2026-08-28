@@ -104,11 +104,25 @@ def test_write_and_seed_key_generation():
     partitioner = KeyPartitioner(settings)
     prefix = partitioner.plan.prefixes[0]
 
-    write_key1 = partitioner.generate_write_key(prefix)
-    write_key2 = partitioner.generate_write_key(prefix)
+    write_key1 = partitioner.generate_write_key(prefix, slot_index=0)
+    write_key2 = partitioner.generate_write_key(prefix, slot_index=1)
     assert write_key1.startswith(prefix)
     assert write_key1.endswith(".dat")
     assert write_key1 != write_key2
+    assert write_key1 == f"{prefix}slot_00.dat"
+    assert write_key2 == f"{prefix}slot_01.dat"
+
+    # Infinite unique mode
+    settings_inf = Settings(
+        gcs_bucket_name="test-bucket",
+        target_write_qps=1000,
+        target_read_qps=1000,
+        write_key_pool_size=0,
+    )
+    partitioner_inf = KeyPartitioner(settings_inf)
+    write_key_inf1 = partitioner_inf.generate_write_key(prefix)
+    write_key_inf2 = partitioner_inf.generate_write_key(prefix)
+    assert write_key_inf1 != write_key_inf2
 
     seed_key = partitioner.generate_seed_key(prefix, 5)
     assert seed_key == f"{prefix}seed_object_0005.dat"

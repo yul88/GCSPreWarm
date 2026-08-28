@@ -1,5 +1,6 @@
 """Rich terminal dashboard and progress reporting for GCSPreWarm."""
 
+import math
 import os
 from typing import Optional
 
@@ -55,6 +56,21 @@ class ConsoleDashboard:
             f"'{plan.key_prefix_base}'" if plan.key_prefix_base else "(Root namespace)",
             "Base path inside bucket",
         )
+        if plan.target_write_qps > 0:
+            if settings.write_key_pool_size > 0:
+                total_slots = plan.total_allocated_shards * settings.write_key_pool_size
+                writes_per_slot = plan.target_write_qps / total_slots
+                table.add_row(
+                    "Write Key Pool",
+                    f"{settings.write_key_pool_size} keys/shard",
+                    f"{total_slots:,} total rotating slots (~{writes_per_slot:.2f} writes/s/key)",
+                )
+            else:
+                table.add_row(
+                    "Write Key Pool",
+                    "0 (Infinite Unique Keys)",
+                    "Generates a new timestamped object on every write",
+                )
         profile_str = (getattr(settings, "ramp_profile", "AUTO") or "AUTO").upper()
         table.add_row(
             "Ramp Profile",
@@ -137,6 +153,57 @@ class ConsoleDashboard:
                 "[dim](The engine will continue and attempt to drive maximum possible load from this machine)[/dim]"
             )
             self.console.print(Panel(warning_text, title="⚠️ Hardware Sizing Alert", border_style="yellow"))
+            self.console.print()
+            return False
+
+        return True
+
+    def check_write_key_pool_capacity(self, settings: Settings, total_shards: int) -> bool:
+        """Validate WRITE_KEY_POOL_SIZE against target write QPS and total shard count, warning if misconfigured.
+
+        Returns True if configured safely, or False if write rate per key exceeds GCS 1 write/s guidelines.
+        """
+        if settings.target_write_qps <= 0:
+            return True
+
+        if settings.write_key_pool_size == 0:
+            total_est_objects = settings.target_write_qps * max(60, settings.sustain_duration_seconds)
+            notice_text = (
+                f"[bold yellow]ℹ️ Infinite Unique Keys Mode Active (`WRITE_KEY_POOL_SIZE=0`)[/bold yellow]\n\n"
+                f"• Every write request generates a brand new timestamped object.\n"
+                f"• Estimated Objects Created: [bold red]~{total_est_objects:,} objects[/bold red]\n"
+                f"• [bold white]Cleanup Impact:[/bold white] Post-test cleanup requires 1 HTTP DELETE per object "
+                f"and may take [bold yellow]several minutes to over an hour[/bold yellow].\n\n"
+                f"[bold cyan]💡 Recommendation:[/bold cyan] Set [bold green]WRITE_KEY_POOL_SIZE=256[/bold green] "
+                f"to cap total objects to ~{total_shards * 256:,} while achieving 100% full write QPS and <2s cleanup."
+            )
+            self.console.print(Panel(notice_text, title="ℹ️ Key Generation Mode Notice", border_style="yellow"))
+            self.console.print()
+            return True
+
+        total_shards = max(1, total_shards)
+        pool_size = settings.write_key_pool_size
+        total_slots = total_shards * pool_size
+        est_writes_per_slot = settings.target_write_qps / total_slots
+
+        # GCS quota limit is roughly 1 write per second to the same object name; warn if significantly exceeded (>2.0/s)
+        if est_writes_per_slot > 2.0:
+            min_recommended_pool = max(16, math.ceil(settings.target_write_qps / total_shards))
+            suggested_pool = 256 if (settings.key_strategy == "HEX" and min_recommended_pool <= 256) else min_recommended_pool
+
+            warning_text = (
+                f"[bold yellow]⚠️ WRITE_KEY_POOL_SIZE Sizing Warning[/bold yellow]\n\n"
+                f"• [bold white]Configured Write Workload:[/bold white] [bold red]{settings.target_write_qps:,} Write QPS[/bold red] across {total_shards} shards "
+                f"({settings.target_write_qps / total_shards:,.1f} QPS/shard)\n"
+                f"• [bold white]Current WRITE_KEY_POOL_SIZE:[/bold white] [bold yellow]{pool_size} keys/shard[/bold yellow] ({total_slots:,} total rotating slots)\n"
+                f"• [bold white]Estimated Write Rate per Object:[/bold white] [bold red]~{est_writes_per_slot:.2f} writes/second[/bold red]\n"
+                f"• [bold white]GCS Quota Limit:[/bold white] [bold cyan]1 write per second to the same object name[/bold cyan] (per GCS Quotas)\n\n"
+                f"[bold cyan]💡 Sizing Recommendation:[/bold cyan]\n"
+                f"Increase [bold green]WRITE_KEY_POOL_SIZE[/bold green] to at least [bold green]{suggested_pool}[/bold green] (via `--write-key-pool {suggested_pool}` or `.env`) "
+                f"to prevent GCS object immutability lock contention (HTTP 429/503 errors).\n\n"
+                f"[dim](The engine will continue and attempt to drive load with the current pool size)[/dim]"
+            )
+            self.console.print(Panel(warning_text, title="⚠️ Object Mutation Rate Warning", border_style="yellow"))
             self.console.print()
             return False
 
