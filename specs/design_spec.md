@@ -27,10 +27,14 @@
 | `KEEP_WARM_MODE` | `bool` | `false` | Continue low-rate heartbeat traffic to maintain split shards. |
 
 ### 2.2 Centralized System Defaults (`src/config/settings.py`)
-| Parameter | Type | Default | Description |
+| Parameter | Type | Default | Dynamic Computation & Description |
 | :--- | :--- | :--- | :--- |
 | `GCS_BASE_URL` | `str` | `https://storage.googleapis.com` | Base GCS REST/XML API endpoint. |
-| `HTTP_MAX_CONNECTIONS`| `int` | `2000` | Max TCP connections in connection pool. |
+| `NUM_WORKERS` | `int` | `CPU Cores` | Auto-detected CPU cores (`os.cpu_count()`). 1 worker process per core. |
+| `WORKER_POOL_SIZE` | `int` | `Dynamic` | Auto-sized coroutines per process: $\text{clamp}(\lceil \frac{Q_{\text{target}}}{N_{\text{cpus}}} \times 0.05 \rceil, 20, 500)$. |
+| `HTTP_MAX_CONNECTIONS`| `int` | `Dynamic` | Auto-sized TCP pool per worker: $\max(200, \min(2000, \text{pool\_size} \times 2))$. |
+| `SEED_OBJECTS_PER_PREFIX`| `int`| `Dynamic` | Auto-sized seed count per shard: $\max(20, \min(200, \lceil \frac{Q_{\text{read}}}{N_{\text{shards}}} \times 0.1 \rceil))$. |
+| `CLEANUP_CONCURRENCY` | `int` | `Dynamic` | Auto-sized parallel deletion concurrency: $\max(100, \min(1000, N_{\text{cpus}} \times 50))$. |
 | `HTTP_TIMEOUT_SECONDS`| `float`| `10.0` | Individual request timeout in seconds. |
 | `HTTP_KEEP_ALIVE_SECONDS`| `float`| `60.0` | Keep-alive duration for TCP sockets. |
 | `REPORT_INTERVAL_SECONDS`| `float`| `2.0` | Metrics reporting and console refresh interval. |
@@ -38,7 +42,6 @@
 | `BACKOFF_FACTOR` | `float`| `0.5` | Exponential backoff factor for retries. |
 | `THROTTLING_ERROR_THRESHOLD`| `float`| `0.01` | Error rate (1%) triggering adaptive ramp backoff. |
 | `STABILIZATION_COOLDOWN_SECONDS`| `int` | `60` | Cooldown period on throttling before resuming ramp. |
-| `NUM_WORKERS` | `int` | `1` | Worker concurrency multiplier (auto-detected CPU cores). |
 
 ---
 
@@ -125,3 +128,22 @@ stateDiagram-v2
 | **30k – 100k+ QPS**| `c2-standard-16` / `c3-standard-22` | 16–22 vCPU, 64 GB, 50–100 Gbps Tier_1 | Massive enterprise pre-warming across 256–4096 shard keyspaces. |
 
 * **Co-Location Requirement**: All VM instances MUST be deployed inside the same Google Cloud region as the target GCS bucket for direct intra-VPC storage network routing.
+
+### 6.1 Platform Capacity Pre-Flight Validation
+Prior to execution, the engine validates whether the current execution platform has sufficient vCPU and network bandwidth capacity to generate the configured target QPS:
+* **Cloud Shell**: Capped at ~1,500 QPS (prompts user to deploy a dedicated GCE VM for $\ge 5,000$ QPS).
+* **GCE / Linux VM**: Estimated at $\sim 2,500\text{ HTTPS QPS / vCPU}$.
+* **Action on Over-subscription**: Warns the user with a prominent hardware sizing alert and provides specific machine type recommendations (e.g. `n4-highcpu-4`, `n4-highcpu-8`, `c3-highcpu-16`, or multi-client distribution).
+
+---
+
+## 7. High-Throughput Engine Optimizations
+1. **Dynamic Persistent Worker Coroutine Pool**:
+   * Sized dynamically per worker process based on Little's Law:
+     $$\text{Pool Size} = \text{clamp}\left(\left\lceil \frac{Q_{\text{target}}}{N_{\text{workers}}} \times 0.05 \right\rceil, \text{min}=20, \text{max}=500\right)$$
+   * Automatically allocates fewer coroutines (20) for small workloads to conserve memory and scales up to hundreds for high-QPS runs, eliminating per-request Task/Future allocations.
+2. **C-Based `uvloop` Event Loop**: Automatically attaches `uvloop` (libuv C-engine) on Linux/macOS for 2x–3x higher event loop throughput.
+3. **Cached Authorization Headers**: Proactively caches OAuth2 header dictionaries in memory with non-blocking refresh, eliminating 15,000+ dictionary allocations per second.
+4. **Lock-Free Concurrency**: Leverages `aiohttp.TCPConnector` native connection limits, eliminating redundant Python semaphores and lock contention.
+5. **Direct Socket Tuning**: Enables `TCP_NODELAY` and HTTP Keep-Alive pooling for immediate packet dispatch without OS buffer delay.
+

@@ -240,12 +240,11 @@ class TokenBucketRateLimiter:
 
     async def acquire(self) -> None:
         """Asynchronously wait until a token is available."""
-        if self.rate <= 0.0:
-            # If rate is 0, sleep a bit to avoid busy loop
-            await asyncio.sleep(0.1)
-            return
-
         while True:
+            if self.rate <= 0.0:
+                await asyncio.sleep(0.1)
+                continue
+
             async with self._lock:
                 now = time.perf_counter()
                 elapsed = now - self.last_refill

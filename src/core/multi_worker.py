@@ -9,7 +9,7 @@ import logging
 import multiprocessing
 from multiprocessing import Event, Manager, Process, Queue, Value
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from src.auth.gcp_auth import get_auth_provider
 from src.config.settings import Settings
@@ -32,6 +32,17 @@ def _worker_process_entry(
     keys_queue: Queue,
 ) -> None:
     """Entry point for a single parallel worker process."""
+    from src.config.settings import optimize_system_resources
+
+    optimize_system_resources()
+
+    # Enable high-performance C-based uvloop if available
+    try:
+        import uvloop
+        uvloop.install()
+    except (ImportError, AttributeError):
+        pass
+
     # Ensure fresh async event loop for this process
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -76,7 +87,10 @@ def _worker_process_entry(
 
         engine._is_running = False
         for t in tasks:
-            t.cancel()
+            if not t.done():
+                t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         # Collect created keys for cleanup (batch send)
         if engine._created_keys:
@@ -85,6 +99,14 @@ def _worker_process_entry(
             except Exception:
                 pass
 
+        try:
+            keys_queue.close()
+            keys_queue.cancel_join_thread()
+            metrics_queue.close()
+            metrics_queue.cancel_join_thread()
+        except Exception:
+            pass
+
         await engine.close()
 
     try:
@@ -92,7 +114,10 @@ def _worker_process_entry(
     except KeyboardInterrupt:
         pass
     finally:
-        loop.close()
+        try:
+            loop.close()
+        except Exception:
+            pass
 
 
 class MultiProcessOrchestrator:
@@ -167,8 +192,10 @@ class MultiProcessOrchestrator:
     def stop(self) -> None:
         """Signal all worker processes to stop and join."""
         self._stop_event.set()
+        # Drain queues before joining
+        self.get_created_keys()
         for p in self._processes:
-            p.join(timeout=1.0)
+            p.join(timeout=0.2)
             if p.is_alive():
                 p.terminate()
 

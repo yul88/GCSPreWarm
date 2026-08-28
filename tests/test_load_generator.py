@@ -84,3 +84,42 @@ async def test_multiprocess_orchestrator():
 
     orchestrator.stop()
 
+
+def test_dynamic_pipeline_pool_sizing():
+    """Verify dynamic pool size calculation based on target QPS and CPU workers."""
+    settings = Settings(
+        gcs_bucket_name="test-bucket",
+        target_read_qps=10000,
+        target_write_qps=5000,
+        num_workers=8,
+    )
+    partitioner = KeyPartitioner(settings)
+    auth = GCPAuthProvider(mock_mode=True)
+    engine = GCSLoadEngine(
+        settings=settings,
+        partitioner=partitioner,
+        auth_provider=auth,
+        metrics=MetricsCollector(2.0),
+        mock_mode=True,
+    )
+
+    # 1. Target Read QPS: 10,000 across 8 workers -> (10000 / 8) * 0.05 = 62.5 -> 63 coroutines
+    read_pool = engine.compute_pipeline_pool_size(10000)
+    assert read_pool == 63
+
+    # 2. Target Write QPS: 5,000 across 8 workers -> (5000 / 8) * 0.05 = 31.25 -> 32 coroutines
+    write_pool = engine.compute_pipeline_pool_size(5000)
+    assert write_pool == 32
+
+    # 3. Small target QPS (<= 100) clamps to minimum 20
+    small_pool = engine.compute_pipeline_pool_size(100)
+    assert small_pool == 20
+
+    # 4. Massive target QPS (200,000 on 2 workers) clamps to safe max 500
+    huge_pool = engine.compute_pipeline_pool_size(200000)
+    assert huge_pool == 500
+
+    # 5. Manual override respected
+    settings.worker_pool_size = 88
+    assert engine.compute_pipeline_pool_size(10000) == 88
+

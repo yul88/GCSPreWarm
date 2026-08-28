@@ -97,16 +97,15 @@ class Settings(BaseSettings):
     )
 
     # =========================================================================
-    # Engine & Network Tuning Parameters (Internal Defaults)
+    # Engine & Network Tuning Parameters (Dynamic with Manual Overrides)
     # =========================================================================
     gcs_base_url: str = Field(
         default="https://storage.googleapis.com",
         description="Base GCS REST/XML API endpoint.",
     )
-    http_max_connections: int = Field(
-        default=2000,
-        gt=0,
-        description="Maximum TCP connections pool size.",
+    http_max_connections: Optional[int] = Field(
+        default=None,
+        description="Optional manual override for TCP connection pool limit per worker (default: auto-sized from QPS).",
     )
     http_timeout_seconds: float = Field(
         default=10.0,
@@ -151,12 +150,40 @@ class Settings(BaseSettings):
         ge=1,
         description="Worker concurrency process/task multiplier (auto-detected CPU cores).",
     )
-
-    seed_objects_per_prefix: int = Field(
-        default=20,
-        ge=1,
-        description="Number of seed objects to pre-populate per prefix shard for read tests.",
+    worker_pool_size: Optional[int] = Field(
+        default=None,
+        description="Optional manual override for persistent worker coroutines per CPU process (default: auto-sized from target QPS).",
     )
+
+    seed_objects_per_prefix: Optional[int] = Field(
+        default=None,
+        description="Optional manual override for seed objects per shard (default: auto-sized from Read QPS scale).",
+    )
+
+    def get_effective_http_connections(self) -> int:
+        """Dynamically compute connection pool size per worker process."""
+        if self.http_max_connections is not None and self.http_max_connections > 0:
+            return self.http_max_connections
+        # Default dynamic sizing: 2x coroutine pool size, minimum 200, max 2000
+        workers_count = max(1, self.num_workers)
+        max_target = max(self.target_read_qps, self.target_write_qps)
+        per_worker_qps = max_target / workers_count
+        pool_size = max(20, min(500, int(per_worker_qps * 0.05)))
+        return max(200, min(2000, pool_size * 2))
+
+    def get_effective_seed_count(self, total_shards: int) -> int:
+        """Dynamically compute seed object count per prefix shard based on read QPS scale."""
+        if self.seed_objects_per_prefix is not None and self.seed_objects_per_prefix > 0:
+            return self.seed_objects_per_prefix
+        if self.target_read_qps <= 0:
+            return 20
+        shards = max(1, total_shards)
+        per_shard_qps = self.target_read_qps / shards
+        return max(20, min(200, int(per_shard_qps * 0.1)))
+
+    def get_effective_cleanup_concurrency(self) -> int:
+        """Dynamically compute cleanup delete concurrency based on CPU core count."""
+        return max(100, min(1000, self.num_workers * 50))
 
     @field_validator("key_prefix_base")
     @classmethod
@@ -186,6 +213,21 @@ class Settings(BaseSettings):
         if not self.custom_prefixes.strip():
             return []
         return [p.strip() for p in self.custom_prefixes.split(",") if p.strip()]
+
+
+def optimize_system_resources() -> int:
+    """Attempt to increase open file descriptor limit (ulimit -n) to 65,535 for high HTTP concurrency."""
+    try:
+        import resource
+
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = min(65535, hard)
+        if soft < target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+            soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+        return soft
+    except Exception:
+        return 1024
 
 
 _global_settings: Optional[Settings] = None

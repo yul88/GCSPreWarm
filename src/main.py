@@ -176,13 +176,16 @@ async def async_main(args: argparse.Namespace) -> int:
     # Handle Standalone Clean-Only mode
     if args.clean_only:
         console.print(f"\n[bold cyan]🧹 Standalone Cleanup Mode: Sweeping gs://{settings.gcs_bucket_name}/{settings.key_prefix_base}...[/bold cyan]")
-        cleaned_objects = await seed_engine.cleanup_all_objects(max_concurrency=300)
+        cleaned_objects = await seed_engine.cleanup_all_objects()
         console.print(f"[bold green]✓ Standalone cleanup complete! Deleted {cleaned_objects:,} objects.[/bold green]\n")
         await seed_engine.close()
         return 0
 
     # Display plan
     dashboard.print_plan(partitioner.plan, settings)
+
+    # Perform VM platform hardware capacity pre-check
+    dashboard.check_platform_capacity(settings)
 
     if args.dry_run:
         console.print("[bold yellow]ℹ️ Dry-run mode completed. No traffic sent to GCS.[/bold yellow]")
@@ -254,7 +257,8 @@ async def async_main(args: argparse.Namespace) -> int:
         if settings.target_read_qps > 0 and not stop_event.is_set():
             console.print("[cyan]🌱 Phase 1: Pre-populating seed objects for read pre-warm...[/cyan]")
             ramp_controller.phase = ExecutionPhase.SEEDING
-            seed_task = asyncio.create_task(seed_engine.seed_objects(settings.seed_objects_per_prefix))
+            effective_seed_count = settings.get_effective_seed_count(len(partitioner.plan.prefixes))
+            seed_task = asyncio.create_task(seed_engine.seed_objects(effective_seed_count))
             stop_task = asyncio.create_task(stop_event.wait())
             done, pending = await asyncio.wait(
                 [seed_task, stop_task],
@@ -336,7 +340,7 @@ async def async_main(args: argparse.Namespace) -> int:
 
         if settings.cleanup_on_finish and all_created_keys:
             console.print("\n[bold cyan]🧹 Cleaning up created test objects...[/bold cyan]")
-            cleaned_objects = await seed_engine.cleanup_all_objects(max_concurrency=300)
+            cleaned_objects = await seed_engine.cleanup_all_objects()
             console.print(f"[green]✓ Cleaned up {cleaned_objects:,} objects.[/green]")
 
         await seed_engine.close()
@@ -375,6 +379,16 @@ async def async_main(args: argparse.Namespace) -> int:
 
 def main() -> None:
     """CLI Synchronous entrypoint."""
+    from src.config.settings import optimize_system_resources
+
+    optimize_system_resources()
+
+    try:
+        import uvloop
+        uvloop.install()
+    except (ImportError, AttributeError):
+        pass
+
     args = parse_args()
     try:
         sys.exit(asyncio.run(async_main(args)))

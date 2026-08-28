@@ -83,6 +83,65 @@ class ConsoleDashboard:
         self.console.print(table)
         self.console.print()
 
+    def check_platform_capacity(self, settings: Settings) -> bool:
+        """Evaluate if current VM platform has sufficient vCPU capacity for target QPS.
+
+        Returns True if capacity is sufficient, or False if target exceeds estimated limits.
+        """
+        total_target = settings.target_read_qps + settings.target_write_qps
+        if total_target <= 0:
+            return True
+
+        is_cloud_shell = bool(
+            os.environ.get("CLOUD_SHELL")
+            or os.environ.get("DEVSHELL_CLIENT_PORT")
+            or os.path.exists("/google/devshell")
+        )
+        cpus = max(1, os.cpu_count() or 1)
+
+        if is_cloud_shell:
+            max_capacity = 1500
+            platform_desc = f"Google Cloud Shell (Shared vCPU, {cpus} cores detected)"
+            suggestion = (
+                "Google Cloud Shell has shared CPU/network bandwidth limits (~1,500 QPS max).\n"
+                "• For 5,000 – 10,000 QPS: Deploy a dedicated [bold cyan]n4-highcpu-4[/bold cyan] (4 vCPUs) VM.\n"
+                "• For 10,000 – 20,000+ QPS: Deploy a dedicated [bold cyan]n4-highcpu-8[/bold cyan] or [bold cyan]c3-highcpu-8[/bold cyan] (8 vCPUs) VM in the same GCP region as your bucket."
+            )
+        else:
+            # GCE Linux / macOS VM: ~2,500 HTTPS QPS per dedicated physical/virtual core
+            max_capacity = cpus * 2500
+            platform_desc = f"Compute Engine / Linux VM ({cpus} vCPUs)"
+            if total_target <= 10000:
+                rec_vm = "n4-highcpu-4 or c3-highcpu-4 (4 vCPUs)"
+            elif total_target <= 20000:
+                rec_vm = "n4-highcpu-8 or c3-highcpu-8 (8 vCPUs)"
+            elif total_target <= 40000:
+                rec_vm = "n4-highcpu-16 or c3-highcpu-16 (16 vCPUs)"
+            else:
+                rec_vm = f"c3-highcpu-32 (32 vCPUs) or distribute across {max(2, total_target // 20000)}x 8-core VMs"
+
+            suggestion = (
+                f"Client-side HTTPS/TLS encryption and socket management typically scales to ~2,500 QPS per vCPU.\n"
+                f"• Recommended VM Sizing: Upgrade to [bold cyan]{rec_vm}[/bold cyan] in the same GCP region as your bucket.\n"
+                "• Alternatively, run multiple client instances in parallel across the same bucket."
+            )
+
+        if total_target > max_capacity:
+            warning_text = (
+                f"[bold yellow]⚠️ Platform Capacity Pre-Check Warning[/bold yellow]\n\n"
+                f"• [bold white]Current Platform:[/bold white] {platform_desc}\n"
+                f"• [bold white]Estimated Platform Max Capacity:[/bold white] [bold yellow]~{max_capacity:,} QPS[/bold yellow]\n"
+                f"• [bold white]Requested Target Workload:[/bold white] [bold red]{total_target:,} QPS[/bold red] "
+                f"({settings.target_read_qps:,} Read + {settings.target_write_qps:,} Write)\n\n"
+                f"[bold cyan]💡 Sizing Recommendation:[/bold cyan]\n{suggestion}\n\n"
+                "[dim](The engine will continue and attempt to drive maximum possible load from this machine)[/dim]"
+            )
+            self.console.print(Panel(warning_text, title="⚠️ Hardware Sizing Alert", border_style="yellow"))
+            self.console.print()
+            return False
+
+        return True
+
     def render_live_status(self, ramp: RampState, metrics: MetricSnapshot) -> Table:
         """Render live real-time status table for periodic reporting."""
         # Phase formatting

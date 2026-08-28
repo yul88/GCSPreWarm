@@ -6,6 +6,7 @@ Application Default Credentials, and real-time telemetry recording.
 
 import asyncio
 import logging
+import math
 import random
 import time
 from typing import List, Optional, Set
@@ -49,25 +50,25 @@ class GCSLoadEngine:
         # Tracked keys for cleanup
         self._created_keys: Set[str] = set()
         self._seed_keys: List[str] = []
-        self._keys_lock = asyncio.Lock()
 
         # Session & Connection Pool
         self._session: Optional[aiohttp.ClientSession] = None
         self._connector: Optional[aiohttp.TCPConnector] = None
-        self._concurrency_semaphore = asyncio.Semaphore(self.settings.http_max_connections)
 
-        # Control flag
+        # Control flag & persistent worker coroutines
         self._is_running = False
+        self._worker_coros: List[asyncio.Task] = []
 
     async def initialize(self) -> None:
         """Initialize HTTP connection pool and aiohttp ClientSession."""
         if self.mock_mode:
             return
 
+        max_conn = self.settings.get_effective_http_connections()
         timeout = aiohttp.ClientTimeout(total=self.settings.http_timeout_seconds)
         self._connector = aiohttp.TCPConnector(
-            limit=self.settings.http_max_connections,
-            limit_per_host=self.settings.http_max_connections,
+            limit=max_conn,
+            limit_per_host=max_conn,
             keepalive_timeout=self.settings.http_keep_alive_seconds,
             ttl_dns_cache=300,
             force_close=False,
@@ -81,6 +82,13 @@ class GCSLoadEngine:
     async def close(self) -> None:
         """Close connection pools and release resources."""
         self._is_running = False
+        if self._worker_coros:
+            for t in list(self._worker_coros):
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*list(self._worker_coros), return_exceptions=True)
+            self._worker_coros.clear()
+
         if self._session and not self._session.closed:
             await self._session.close()
         if self._connector:
@@ -97,25 +105,21 @@ class GCSLoadEngine:
             await asyncio.sleep(random.uniform(0.005, 0.020))
             lat = (time.perf_counter() - t0) * 1000.0
             self.metrics.record_request("WRITE", 200, lat)
-            async with self._keys_lock:
-                self._created_keys.add(key)
+            self._created_keys.add(key)
             return
 
         url = self._get_object_url(key)
         headers = await self.auth_provider.get_auth_headers(project_id=self.settings.gcp_project_id)
-        headers["Content-Type"] = "application/octet-stream"
 
         try:
             assert self._session is not None
-            async with self._concurrency_semaphore:
-                t0 = time.perf_counter()
-                async with self._session.put(url, data=self._payload_bytes, headers=headers) as resp:
-                    lat = (time.perf_counter() - t0) * 1000.0
-                    status = resp.status
-                    self.metrics.record_request("WRITE", status, lat)
-                    if status < 300:
-                        async with self._keys_lock:
-                            self._created_keys.add(key)
+            t0 = time.perf_counter()
+            async with self._session.put(url, data=self._payload_bytes, headers=headers) as resp:
+                lat = (time.perf_counter() - t0) * 1000.0
+                status = resp.status
+                self.metrics.record_request("WRITE", status, lat)
+                if status < 300:
+                    self._created_keys.add(key)
         except Exception as e:
             self.metrics.record_request("WRITE", 0, 0.0, error=str(e))
 
@@ -133,13 +137,12 @@ class GCSLoadEngine:
 
         try:
             assert self._session is not None
-            async with self._concurrency_semaphore:
-                t0 = time.perf_counter()
-                async with self._session.get(url, headers=headers) as resp:
-                    # Read response body to complete transfer
-                    await resp.read()
-                    lat = (time.perf_counter() - t0) * 1000.0
-                    self.metrics.record_request("READ", resp.status, lat)
+            t0 = time.perf_counter()
+            async with self._session.get(url, headers=headers) as resp:
+                # Read response body to complete transfer
+                await resp.read()
+                lat = (time.perf_counter() - t0) * 1000.0
+                self.metrics.record_request("READ", resp.status, lat)
         except Exception as e:
             self.metrics.record_request("READ", 0, 0.0, error=str(e))
 
@@ -180,35 +183,75 @@ class GCSLoadEngine:
 
         return total_created
 
-    async def run_write_worker(self) -> None:
-        """Continuous write worker loop governed by write_limiter."""
+    def compute_pipeline_pool_size(self, target_qps: int) -> int:
+        """Dynamically compute optimal coroutine pipeline depth based on target QPS."""
+        if self.settings.worker_pool_size is not None and self.settings.worker_pool_size > 0:
+            return self.settings.worker_pool_size
+
+        if target_qps <= 0:
+            return 10
+
+        # Little's Law: (Target QPS / CPU Workers) * 50ms network RTT buffer
+        workers_count = max(1, self.settings.num_workers)
+        per_worker_qps = target_qps / workers_count
+        computed = int(math.ceil(per_worker_qps * 0.05))
+        # Clamp between 20 (minimum responsiveness) and 500 (safe max concurrency)
+        return max(20, min(500, computed))
+
+    async def run_write_pipeline(self, pool_size: Optional[int] = None) -> None:
+        """Spawn a pool of persistent write worker coroutines that loop continuously."""
+        if pool_size is None or pool_size <= 0:
+            pool_size = self.compute_pipeline_pool_size(self.settings.target_write_qps)
+
         prefixes = self.plan.prefixes
         num_prefixes = len(prefixes)
-        idx = 0
 
-        while self._is_running:
-            await self.write_limiter.acquire()
-            if not self._is_running:
-                break
-            prefix = prefixes[idx % num_prefixes]
-            idx += 1
-            key = self.partitioner.generate_write_key(prefix)
-            asyncio.create_task(self._execute_write(key))
+        async def _write_worker_loop(worker_idx: int):
+            idx = worker_idx
+            while self._is_running:
+                await self.write_limiter.acquire()
+                if not self._is_running:
+                    break
+                prefix = prefixes[idx % num_prefixes]
+                idx += 1
+                key = self.partitioner.generate_write_key(prefix)
+                await self._execute_write(key)
 
-    async def run_read_worker(self) -> None:
-        """Continuous read worker loop governed by read_limiter."""
+        workers = [asyncio.create_task(_write_worker_loop(i)) for i in range(pool_size)]
+        self._worker_coros.extend(workers)
+        await asyncio.gather(*workers, return_exceptions=True)
+
+    async def run_read_pipeline(self, pool_size: Optional[int] = None) -> None:
+        """Spawn a pool of persistent read worker coroutines that loop continuously."""
+        if pool_size is None or pool_size <= 0:
+            pool_size = self.compute_pipeline_pool_size(self.settings.target_read_qps)
+
         if not self._seed_keys:
             # Fallback: if no seed keys, generate dummy read keys
             for prefix in self.plan.prefixes:
                 self._seed_keys.append(self.partitioner.generate_seed_key(prefix, 0))
 
         num_keys = len(self._seed_keys)
-        while self._is_running:
-            await self.read_limiter.acquire()
-            if not self._is_running:
-                break
-            key = self._seed_keys[random.randint(0, num_keys - 1)]
-            asyncio.create_task(self._execute_read(key))
+
+        async def _read_worker_loop():
+            while self._is_running:
+                await self.read_limiter.acquire()
+                if not self._is_running:
+                    break
+                key = self._seed_keys[random.randint(0, num_keys - 1)]
+                await self._execute_read(key)
+
+        workers = [asyncio.create_task(_read_worker_loop()) for i in range(pool_size)]
+        self._worker_coros.extend(workers)
+        await asyncio.gather(*workers, return_exceptions=True)
+
+    async def run_write_worker(self) -> None:
+        """Backward-compatible alias for run_write_pipeline."""
+        await self.run_write_pipeline()
+
+    async def run_read_worker(self) -> None:
+        """Backward-compatible alias for run_read_pipeline."""
+        await self.run_read_pipeline()
 
     def update_rates(self, read_qps: float, write_qps: float) -> None:
         """Update active rate limiters with new QPS targets."""
@@ -248,27 +291,44 @@ class GCSLoadEngine:
 
         return found_keys
 
-    async def cleanup_all_objects(self, max_concurrency: int = 300) -> int:
+    async def cleanup_all_objects(self, max_concurrency: Optional[int] = None) -> int:
         """Delete all created test objects, seed objects, and leftover objects under prefix."""
+        if max_concurrency is None or max_concurrency <= 0:
+            max_concurrency = self.settings.get_effective_cleanup_concurrency()
+
         all_keys = set(self._created_keys) | set(self._seed_keys)
 
+        # In mock mode, instant cleanup
+        if self.mock_mode:
+            deleted_count = len(all_keys)
+            self._created_keys.clear()
+            self._seed_keys.clear()
+            return deleted_count
+
         # Also sweep any objects under the key prefix base to catch leftover files from previous runs
-        if self.settings.key_prefix_base and not self.mock_mode:
+        if self.settings.key_prefix_base:
             listed_keys = await self.list_objects_by_prefix(self.settings.key_prefix_base)
             all_keys.update(listed_keys)
 
         if not all_keys:
             return 0
 
+        keys_list = list(all_keys)
+        deleted_count = 0
         semaphore = asyncio.Semaphore(max_concurrency)
 
         async def _bounded_delete(k: str) -> bool:
             async with semaphore:
                 return await self._execute_delete(k)
 
-        tasks = [_bounded_delete(k) for k in all_keys]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        deleted_count = sum(1 for r in results if r is True)
+        # Process in chunks of 1000
+        chunk_size = 1000
+        for i in range(0, len(keys_list), chunk_size):
+            chunk = keys_list[i : i + chunk_size]
+            tasks = [_bounded_delete(k) for k in chunk]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            deleted_count += sum(1 for r in results if r is True)
+
         self._created_keys.clear()
         self._seed_keys.clear()
         return deleted_count

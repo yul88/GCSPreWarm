@@ -7,6 +7,7 @@ automatic proactive caching and refreshing.
 import asyncio
 import datetime
 import logging
+import time
 from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,9 @@ class GCPAuthProvider:
         self._token: Optional[str] = None
         self._expiry: Optional[datetime.datetime] = None
         self._lock = asyncio.Lock()
+        self._cached_headers: Dict[str, str] = {}
+        self._cached_project_id: Optional[str] = None
+        self._last_refresh_mono: float = 0.0
 
     def _init_credentials(self) -> None:
         """Initialize Google credentials if not already loaded."""
@@ -121,12 +125,39 @@ class GCPAuthProvider:
         return self._token or ""
 
     async def get_auth_headers(self, project_id: Optional[str] = None) -> Dict[str, str]:
-        """Return HTTP headers with Authorization Bearer token and optional user project."""
-        token = await self.get_bearer_token()
-        headers = {"Authorization": f"Bearer {token}"}
-        if project_id and project_id.strip():
-            headers["x-goog-user-project"] = project_id.strip()
-        return headers
+        """Return cached HTTP headers, refreshing proactively with zero per-request allocation."""
+        if self.mock_mode:
+            return {"Authorization": "Bearer mock-bearer-token-for-dry-run"}
+
+        now_mono = time.monotonic()
+        # Fast path: return cached header dict without lock or datetime allocations
+        if (
+            self._cached_headers
+            and (now_mono - self._last_refresh_mono < 60.0)
+            and (self._cached_project_id == project_id)
+        ):
+            return self._cached_headers
+
+        async with self._lock:
+            # Recheck inside lock
+            if (
+                self._cached_headers
+                and (now_mono - self._last_refresh_mono < 60.0)
+                and (self._cached_project_id == project_id)
+            ):
+                return self._cached_headers
+
+            token = await self.get_bearer_token()
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "User-Agent": "GCSPreWarm/1.0",
+            }
+            if project_id and project_id.strip():
+                headers["x-goog-user-project"] = project_id.strip()
+            self._cached_headers = headers
+            self._cached_project_id = project_id
+            self._last_refresh_mono = time.monotonic()
+            return self._cached_headers
 
 
 _auth_provider_instance: Optional[GCPAuthProvider] = None
